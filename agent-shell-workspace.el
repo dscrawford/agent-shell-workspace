@@ -52,6 +52,7 @@
 
 (require 'agent-shell)
 (require 'tab-bar)
+(require 'hl-line)
 (require 'map)
 (require 'seq)
 
@@ -320,6 +321,11 @@ Displays a compact list of agent-shell buffers with status icons.
   (setq buffer-read-only t)
   (setq truncate-lines t)
   (setq cursor-type nil)
+  ;; The cursor is hidden above, so without this there is no cue for which row
+  ;; point is on and navigating the list gives no feedback.  hl-line marks
+  ;; point; `agent-shell-workspace-selected' marks the agent actually shown in
+  ;; the main area.  They coincide after a refresh and diverge while browsing.
+  (hl-line-mode 1)
   ;; Start auto-refresh timer
   (setq agent-shell-workspace-sidebar--refresh-timer
         (run-with-timer 2 2 #'agent-shell-workspace-sidebar-refresh))
@@ -432,7 +438,15 @@ If NAME is longer than WIDTH, it will be truncated with ellipsis."
             ;; Add text properties for interaction (no mouse-face to preserve box styling)
             (setq line (propertize line
                                    'agent-shell-workspace-buffer buf))
-            (insert line "\n")
+            (let ((start (point)))
+              (insert line "\n")
+              ;; Highlight the selected row.  Appended, so the logo and name
+              ;; boxes keep their own backgrounds and only the rest of the row
+              ;; picks up the selection background.  The region includes the
+              ;; newline so the face's :extend fills out to the window edge.
+              (when (eq buf selected)
+                (add-face-text-property start (point)
+                                        'agent-shell-workspace-selected t)))
             (setq line-num (1+ line-num))))))
     ;; Restore cursor to selected line
     (goto-char (point-min))
