@@ -171,6 +171,24 @@ Parses the prefix before \" Agent @ \" in the buffer name."
         (match-string 1 name)
       "-")))
 
+(defun agent-shell-workspace--session-title (buffer)
+  "Return BUFFER's session title as a single trimmed line, or nil.
+
+agent-shell keeps this at `(:session :title)'.  Agents that implement the
+`session/list' capability supply it; for the others (Claude Code among
+them) agent-shell seeds it with the first user prompt, so it is a usable
+summary either way.
+
+The seeded value is a raw prompt, so it may be long and multi-line: keep
+the first non-blank line only."
+  (when-let* ((state (buffer-local-value 'agent-shell--state buffer))
+              (title (map-nested-elt state '(:session :title)))
+              ((stringp title))
+              (line (seq-find (lambda (s) (not (string-blank-p s)))
+                              (split-string title "\n")))
+              ((not (string-blank-p line))))
+    (string-trim line)))
+
 (defun agent-shell-workspace--resolved-agent-configs ()
   "Return `agent-shell-agent-configs' with maker entries realized.
 
@@ -214,6 +232,13 @@ default, so entries must be realized before they can be read with
 
 (defvar agent-shell-workspace-sidebar-width 24
   "Width of the sidebar window in columns.")
+
+(defvar agent-shell-workspace-sidebar-show-session-title t
+  "When non-nil, show each agent's session title beneath its row.
+
+Several agents in one project all render the same short name, so the
+title is often the only thing telling them apart.  Set to nil for a
+one-line-per-agent list.")
 
 (defvar-local agent-shell-workspace-sidebar--refresh-timer nil
   "Timer for auto-refreshing the sidebar.")
@@ -288,6 +313,11 @@ Returns the portion after \" @ \" if present, otherwise the full name."
   "Face for agents waiting for user input."
   :group 'agent-shell-workspace)
 
+(defface agent-shell-workspace-session-title
+  '((t :inherit font-lock-comment-face))
+  "Face for the session title line beneath an agent."
+  :group 'agent-shell-workspace)
+
 ;;;; Keymap
 
 (defvar agent-shell-workspace-sidebar-mode-map
@@ -307,6 +337,12 @@ Returns the portion after \" @ \" if present, otherwise the full name."
     (define-key map (kbd "x") #'agent-shell-workspace-tile-remove)
     (define-key map (kbd "R") #'agent-shell-workspace-sidebar-rename)
     (define-key map (kbd "s") #'agent-shell-workspace-sidebar-toggle-quick-switch)
+    ;; special-mode binds these to plain line motion, which would stop on
+    ;; session title lines and take two presses per agent.
+    (define-key map (kbd "n") #'agent-shell-workspace-sidebar-next)
+    (define-key map (kbd "p") #'agent-shell-workspace-sidebar-previous)
+    (define-key map (kbd "<down>") #'agent-shell-workspace-sidebar-next)
+    (define-key map (kbd "<up>") #'agent-shell-workspace-sidebar-previous)
     (define-key map (kbd "q") #'quit-window)
     map)
   "Keymap for `agent-shell-workspace-sidebar-mode'.")
@@ -431,7 +467,9 @@ If NAME is longer than WIDTH, it will be truncated with ellipsis."
                     name-box))
                  ;; Add selection indicator ">" for current buffer
                  (selection-indicator (if (eq buf selected) ">" " "))
-                 (line (concat selection-indicator " " logo-box name-box-styled tile-indicator)))
+                 (line (concat selection-indicator " " logo-box name-box-styled tile-indicator))
+                 (title (when agent-shell-workspace-sidebar-show-session-title
+                          (agent-shell-workspace--session-title buf))))
             ;; Track selected line for cursor positioning
             (when (eq buf selected)
               (setq target-line line-num))
@@ -440,10 +478,26 @@ If NAME is longer than WIDTH, it will be truncated with ellipsis."
                                    'agent-shell-workspace-buffer buf))
             (let ((start (point)))
               (insert line "\n")
+              (when title
+                ;; Indent under the row and truncate to the sidebar width, so a
+                ;; long seeded prompt cannot wrap and desync the line count.
+                ;; Carries the same buffer property as the row above it, so
+                ;; clicking or resting point here still resolves to the agent.
+                (let* ((budget (max 8 (- agent-shell-workspace-sidebar-width 5)))
+                       (shown (if (> (length title) budget)
+                                  (concat (substring title 0 (1- budget)) "…")
+                                title)))
+                  (insert (propertize (concat "    " shown)
+                                      'face 'agent-shell-workspace-session-title
+                                      'help-echo title
+                                      'agent-shell-workspace-buffer buf)
+                          "\n")
+                  (setq line-num (1+ line-num))))
               ;; Highlight the selected row.  Appended, so the logo and name
               ;; boxes keep their own backgrounds and only the rest of the row
               ;; picks up the selection background.  The region includes the
-              ;; newline so the face's :extend fills out to the window edge.
+              ;; trailing newline so the face's :extend fills out to the window
+              ;; edge, and the title line so the whole entry reads as one.
               (when (eq buf selected)
                 (add-face-text-property start (point)
                                         'agent-shell-workspace-selected t)))
@@ -466,6 +520,47 @@ If NAME is longer than WIDTH, it will be truncated with ellipsis."
 (defun agent-shell-workspace-sidebar--buffer-at-point ()
   "Return the agent buffer associated with the line at point."
   (get-text-property (line-beginning-position) 'agent-shell-workspace-buffer))
+
+(defun agent-shell-workspace-sidebar--row-positions ()
+  "Return the start position of each agent row, in display order.
+
+An entry may span more than one line once session titles are shown, so a
+row starts wherever the buffer property changes."
+  (let (positions (previous nil))
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((buf (agent-shell-workspace-sidebar--buffer-at-point)))
+          (when (and buf (not (eq buf previous)))
+            (push (line-beginning-position) positions))
+          (setq previous buf))
+        (forward-line 1)))
+    (nreverse positions)))
+
+(defun agent-shell-workspace-sidebar--move (n)
+  "Move N agent rows forward, or backward when N is negative.
+Stops at the ends of the list rather than wrapping."
+  (when-let* ((positions (agent-shell-workspace-sidebar--row-positions)))
+    (let* ((buffers (mapcar (lambda (pos)
+                              (get-text-property pos 'agent-shell-workspace-buffer))
+                            positions))
+           (index (or (seq-position buffers
+                                    (agent-shell-workspace-sidebar--buffer-at-point))
+                      0))
+           (target (max 0 (min (1- (length positions)) (+ index n)))))
+      (goto-char (nth target positions)))))
+
+(defun agent-shell-workspace-sidebar-next (&optional n)
+  "Move to the next agent, skipping over session title lines.
+With prefix argument N, move that many agents."
+  (interactive "p")
+  (agent-shell-workspace-sidebar--move (or n 1)))
+
+(defun agent-shell-workspace-sidebar-previous (&optional n)
+  "Move to the previous agent, skipping over session title lines.
+With prefix argument N, move that many agents."
+  (interactive "p")
+  (agent-shell-workspace-sidebar--move (- (or n 1))))
 
 ;;;; Interaction commands
 
