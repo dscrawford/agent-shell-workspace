@@ -170,6 +170,19 @@ Parses the prefix before \" Agent @ \" in the buffer name."
         (match-string 1 name)
       "-")))
 
+(defun agent-shell-workspace--resolved-agent-configs ()
+  "Return `agent-shell-agent-configs' with maker entries realized.
+
+Each entry is either a configuration alist or a function (a symbol or
+lambda) returning one.  agent-shell moved to maker functions as the
+default, so entries must be realized before they can be read with
+`map-elt'.  Handling both shapes keeps this working across versions."
+  (mapcar (lambda (entry)
+            (if (functionp entry)
+                (funcall entry)
+              entry))
+          agent-shell-agent-configs))
+
 (defun agent-shell-workspace--buffer-config (buffer)
   "Return the agent-shell config used for BUFFER, or nil."
   (with-current-buffer buffer
@@ -177,7 +190,7 @@ Parses the prefix before \" Agent @ \" in the buffer name."
       (let ((prefix (replace-regexp-in-string " Agent @ .*$" "" (buffer-name))))
         (seq-find (lambda (config)
                     (string= prefix (map-elt config :buffer-name)))
-                  agent-shell-agent-configs)))))
+                  (agent-shell-workspace--resolved-agent-configs))))))
 
 ;;; Tab helpers
 
