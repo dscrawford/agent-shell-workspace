@@ -171,6 +171,26 @@ character when no icon is available."
                       'agent-shell-workspace-sidebar--selected-buffer sidebar)))
       (should (or (null selected) (buffer-live-p selected))))))
 
+(ert-deftest agent-shell-workspace-test-sidebar-toggle-makes-no-tab ()
+  "The plain sidebar toggle must not create a tab or disturb the layout."
+  (agent-shell-workspace-test--with-agents
+    (let ((tabs-before (length (tab-bar-tabs)))
+          (buffer-before (window-buffer (selected-window))))
+      (agent-shell-workspace-sidebar-toggle)
+      (redisplay t)
+      (should (agent-shell-workspace-test--sidebar-window))
+      ;; A real side window, not a tab and not a takeover of the layout.
+      (should (window-parameter (agent-shell-workspace-test--sidebar-window)
+                                'window-side))
+      (should (= tabs-before (length (tab-bar-tabs))))
+      (should (not (agent-shell-workspace--tab-exists-p)))
+      (should (eq buffer-before (window-buffer (selected-window))))
+      ;; Toggling again puts it away.
+      (agent-shell-workspace-sidebar-toggle)
+      (redisplay t)
+      (should (not (agent-shell-workspace-test--sidebar-window)))
+      (should (= tabs-before (length (tab-bar-tabs)))))))
+
 (defun agent-shell-workspace-sidebar-goto-buffer-for-test (name)
   "Select the agent called NAME through the real selection path."
   (agent-shell-workspace-test--park-on name)

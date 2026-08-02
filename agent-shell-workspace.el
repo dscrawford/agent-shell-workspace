@@ -881,7 +881,30 @@ Shows the buffer in the main area without moving focus."
         (let ((live-buffers (seq-filter #'buffer-live-p (agent-shell-buffers))))
           (when live-buffers
             (setq agent-shell-workspace-sidebar--selected-buffer (car live-buffers)))))
-      (agent-shell-workspace-sidebar--render))))
+      (agent-shell-workspace-sidebar--render))
+    window))
+
+(defun agent-shell-workspace-sidebar-close ()
+  "Hide the agent sidebar in the current frame."
+  (interactive)
+  (when-let* ((window (get-buffer-window
+                       agent-shell-workspace-sidebar-buffer-name)))
+    (when (window-live-p window)
+      ;; Dedicated side windows refuse some deletions; clear the flag first.
+      (set-window-dedicated-p window nil)
+      (delete-window window))))
+
+;;;###autoload
+(defun agent-shell-workspace-sidebar-toggle ()
+  "Show or hide the agent sidebar in the current frame.
+
+Unlike `agent-shell-workspace-toggle', this does not create a tab, take
+over the window layout, or activate buffer isolation.  The sidebar is
+just a side window alongside whatever you are already working on."
+  (interactive)
+  (if (get-buffer-window agent-shell-workspace-sidebar-buffer-name)
+      (agent-shell-workspace-sidebar-close)
+    (agent-shell-workspace-sidebar-open)))
 
 ;;;; Agent management commands
 
