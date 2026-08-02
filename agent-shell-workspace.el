@@ -493,8 +493,17 @@ If NAME is longer than WIDTH, it will be truncated with ellipsis."
                         :box (:line-width 1 :color ,fg)))))
 
 (defun agent-shell-workspace-sidebar--render ()
-  "Render the sidebar contents, grouped by project."
-  (let* ((buffers (seq-filter #'buffer-live-p (agent-shell-buffers)))
+  "Render the sidebar contents, grouped by project.
+
+Point is preserved by identity across the rebuild, and pushed out to every
+window showing the sidebar: `erase-buffer' resets each window's own point,
+which `goto-char' on the buffer does not put back."
+  (let* ((restore (agent-shell-workspace-sidebar--entry-at-point))
+         (windows (get-buffer-window-list (current-buffer) nil t))
+         (starts (mapcar (lambda (window)
+                           (cons window (window-start window)))
+                         windows))
+         (buffers (seq-filter #'buffer-live-p (agent-shell-buffers)))
          (groups (agent-shell-workspace--group-buffers buffers))
          (selected agent-shell-workspace-sidebar--selected-buffer)
          (tiled agent-shell-workspace--tiled-buffers)
@@ -581,20 +590,30 @@ If NAME is longer than WIDTH, it will be truncated with ellipsis."
                 (add-face-text-property start (point)
                                         'agent-shell-workspace-selected t)))
             (setq line-num (1+ line-num))))))))
-    ;; Restore cursor to selected line
-    (goto-char (point-min))
-    (when target-line
-      (forward-line (1- target-line)))))
+    ;; Prefer wherever the user actually was; fall back to the selected row
+    ;; only when that entry is gone.
+    (unless (agent-shell-workspace-sidebar--goto-entry restore)
+      (goto-char (point-min))
+      (when target-line
+        (forward-line (1- target-line))))
+    (dolist (window windows)
+      (when (window-live-p window)
+        (set-window-point window (point))
+        ;; Keep the view where it was so a refresh does not scroll under the
+        ;; user.  Non-nil NOFORCE lets redisplay correct it if the list
+        ;; shrank past this point.
+        (let ((start (cdr (assq window starts))))
+          (when (and start (<= start (point-max)))
+            (set-window-start window start t)))))))
 
 (defun agent-shell-workspace-sidebar-refresh ()
-  "Refresh the sidebar if it exists."
+  "Refresh the sidebar if it exists.
+Point is preserved by `agent-shell-workspace-sidebar--render'."
   (interactive)
   (when-let ((buf (get-buffer agent-shell-workspace-sidebar-buffer-name)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
-        (let ((saved-point (point)))
-          (agent-shell-workspace-sidebar--render)
-          (goto-char (min saved-point (point-max))))))))
+        (agent-shell-workspace-sidebar--render)))))
 
 (defun agent-shell-workspace-sidebar--buffer-at-point ()
   "Return the agent buffer associated with the line at point."
@@ -603,6 +622,54 @@ If NAME is longer than WIDTH, it will be truncated with ellipsis."
 (defun agent-shell-workspace-sidebar--project-at-point ()
   "Return the project key for the line at point, or nil."
   (get-text-property (line-beginning-position) 'agent-shell-workspace-project))
+
+(defun agent-shell-workspace-sidebar--entry-at-point ()
+  "Return an identity for the line at point, or nil.
+
+Value is (BUFFER PROJECT TITLE-LINE-P).  Rendering erases and rebuilds the
+buffer, so position cannot be restored by character offset: rows change
+width and count as statuses change, titles arrive and groups fold.  Restore
+by identity instead, the way `tabulated-list-print' does with REMEMBER-POS."
+  (let* ((buffer (agent-shell-workspace-sidebar--buffer-at-point))
+         (project (agent-shell-workspace-sidebar--project-at-point))
+         (title-line-p (and buffer
+                            (> (line-beginning-position) (point-min))
+                            (save-excursion
+                              (forward-line -1)
+                              (eq buffer
+                                  (agent-shell-workspace-sidebar--buffer-at-point))))))
+    (when (or buffer project)
+      (list buffer project title-line-p))))
+
+(defun agent-shell-workspace-sidebar--goto-entry (entry)
+  "Move point to ENTRY, as returned by `--entry-at-point'.
+Return non-nil when ENTRY was found, nil when it is gone (agent killed,
+group collapsed) so the caller can fall back."
+  (when entry
+    (let ((buffer (nth 0 entry))
+          (project (nth 1 entry))
+          (title-line-p (nth 2 entry))
+          (found nil))
+      (save-excursion
+        (goto-char (point-min))
+        (while (and (not found) (not (eobp)))
+          (when (if buffer
+                    (eq buffer (agent-shell-workspace-sidebar--buffer-at-point))
+                  (and (null (agent-shell-workspace-sidebar--buffer-at-point))
+                       (equal project
+                              (agent-shell-workspace-sidebar--project-at-point))))
+            (setq found (line-beginning-position)))
+          (forward-line 1)))
+      (when found
+        (goto-char found)
+        ;; Was on the title line: stay on it when it is still rendered.
+        (when (and title-line-p
+                   (save-excursion
+                     (and (zerop (forward-line 1))
+                          (eq buffer
+                              (agent-shell-workspace-sidebar--buffer-at-point)))))
+          (forward-line 1))
+        t))))
 
 (defun agent-shell-workspace-sidebar-toggle-project ()
   "Collapse or expand the project group at point.
