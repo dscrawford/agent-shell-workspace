@@ -171,6 +171,61 @@ Parses the prefix before \" Agent @ \" in the buffer name."
         (match-string 1 name)
       "-")))
 
+(defun agent-shell-workspace--project-key (buffer)
+  "Return BUFFER's working directory, used to group the sidebar.
+
+Keyed on the directory rather than the parsed buffer name because
+`agent-shell-workspace-sidebar-rename' rewrites the name but leaves the
+project alone.  Two projects sharing a basename stay in separate groups."
+  (let ((dir (buffer-local-value 'default-directory buffer)))
+    (if (and dir (stringp dir))
+        (file-name-as-directory (expand-file-name dir))
+      "")))
+
+(defun agent-shell-workspace--project-label (key)
+  "Return the display label for project KEY."
+  (if (string-empty-p key)
+      "(no project)/"
+    (concat (file-name-nondirectory (directory-file-name key)) "/")))
+
+(defun agent-shell-workspace--row-label (buffer)
+  "Return the label for BUFFER's row inside its project group.
+
+The short name is the project name for an unrenamed buffer, which would
+just repeat the group header, so fall back to the agent kind there."
+  (let ((short (agent-shell-workspace--short-name buffer))
+        (project (file-name-nondirectory
+                  (directory-file-name
+                   (agent-shell-workspace--project-key buffer)))))
+    (if (string= short project)
+        (agent-shell-workspace--agent-kind buffer)
+      short)))
+
+(defun agent-shell-workspace--group-buffers (buffers)
+  "Group BUFFERS by project.
+
+Returns a list of (KEY LABEL . BUFFERS), sorted by label then key, with
+each group's buffers sorted by row label."
+  (let ((groups (list)))
+    (dolist (buf buffers)
+      (let* ((key (agent-shell-workspace--project-key buf))
+             (cell (assoc key groups)))
+        (if cell
+            (setcdr (cdr cell) (cons buf (cddr cell)))
+          (push (cons key (cons (agent-shell-workspace--project-label key) (list buf)))
+                groups))))
+    (dolist (cell groups)
+      (setcdr (cdr cell)
+              (sort (nreverse (cddr cell))
+                    (lambda (a b)
+                      (string< (agent-shell-workspace--row-label a)
+                               (agent-shell-workspace--row-label b))))))
+    (sort groups
+          (lambda (a b)
+            (if (string= (cadr a) (cadr b))
+                (string< (car a) (car b))
+              (string< (cadr a) (cadr b)))))))
+
 (defun agent-shell-workspace--session-title (buffer)
   "Return BUFFER's session title as a single trimmed line, or nil.
 
@@ -242,6 +297,9 @@ one-line-per-agent list.")
 
 (defvar-local agent-shell-workspace-sidebar--refresh-timer nil
   "Timer for auto-refreshing the sidebar.")
+
+(defvar-local agent-shell-workspace-sidebar--collapsed nil
+  "List of project keys whose groups are collapsed in the sidebar.")
 
 (defvar-local agent-shell-workspace-sidebar--selected-buffer nil
   "Currently selected agent buffer in the sidebar.")
@@ -318,6 +376,11 @@ Returns the portion after \" @ \" if present, otherwise the full name."
   "Face for the session title line beneath an agent."
   :group 'agent-shell-workspace)
 
+(defface agent-shell-workspace-project
+  '((t :inherit font-lock-keyword-face :weight bold))
+  "Face for a project group header in the sidebar."
+  :group 'agent-shell-workspace)
+
 ;;;; Keymap
 
 (defvar agent-shell-workspace-sidebar-mode-map
@@ -343,6 +406,8 @@ Returns the portion after \" @ \" if present, otherwise the full name."
     (define-key map (kbd "p") #'agent-shell-workspace-sidebar-previous)
     (define-key map (kbd "<down>") #'agent-shell-workspace-sidebar-next)
     (define-key map (kbd "<up>") #'agent-shell-workspace-sidebar-previous)
+    (define-key map (kbd "TAB") #'agent-shell-workspace-sidebar-toggle-project)
+    (define-key map (kbd "<tab>") #'agent-shell-workspace-sidebar-toggle-project)
     (define-key map (kbd "q") #'quit-window)
     map)
   "Keymap for `agent-shell-workspace-sidebar-mode'.")
@@ -428,11 +493,9 @@ If NAME is longer than WIDTH, it will be truncated with ellipsis."
                         :box (:line-width 1 :color ,fg)))))
 
 (defun agent-shell-workspace-sidebar--render ()
-  "Render the sidebar contents."
-  (let* ((buffers (sort (copy-sequence (seq-filter #'buffer-live-p (agent-shell-buffers)))
-                        (lambda (a b)
-                          (string< (agent-shell-workspace--short-name a)
-                                   (agent-shell-workspace--short-name b)))))
+  "Render the sidebar contents, grouped by project."
+  (let* ((buffers (seq-filter #'buffer-live-p (agent-shell-buffers)))
+         (groups (agent-shell-workspace--group-buffers buffers))
          (selected agent-shell-workspace-sidebar--selected-buffer)
          (tiled agent-shell-workspace--tiled-buffers)
          (inhibit-read-only t)
@@ -441,18 +504,32 @@ If NAME is longer than WIDTH, it will be truncated with ellipsis."
          (max-name-width (when buffers
                           (apply #'max
                                  (mapcar (lambda (buf)
-                                          (length (agent-shell-workspace--short-name buf)))
+                                          (length (agent-shell-workspace--row-label buf)))
                                         buffers)))))
     (erase-buffer)
     (if (null buffers)
         (insert (propertize " No agent buffers" 'face 'font-lock-comment-face))
       (let ((line-num 1))
-        (dolist (buf buffers)
+       (dolist (group groups)
+        (let* ((key (car group))
+               (label (cadr group))
+               (members (cddr group))
+               (collapsed (member key agent-shell-workspace-sidebar--collapsed)))
+          (insert (propertize (format "%s %s%s"
+                                      (if collapsed "▸" "▾")
+                                      label
+                                      (if collapsed (format " (%d)" (length members)) ""))
+                              'face 'agent-shell-workspace-project
+                              'help-echo key
+                              'agent-shell-workspace-project key)
+                  "\n")
+          (setq line-num (1+ line-num))
+          (dolist (buf (unless collapsed members))
           (let* ((agent-icon (agent-shell-workspace--agent-icon buf))
                  (status (agent-shell-workspace--track-status
                           buf (agent-shell-workspace--buffer-status buf)))
                  (status-face (agent-shell-workspace--status-face status))
-                 (short-name (agent-shell-workspace--short-name buf))
+                 (short-name (agent-shell-workspace--row-label buf))
                  (tile-indicator (if (memq buf tiled) " ▫" ""))
                  ;; Build the line with bordered boxes
                  ;; Use cyan for finished status, otherwise use status-face
@@ -475,7 +552,8 @@ If NAME is longer than WIDTH, it will be truncated with ellipsis."
               (setq target-line line-num))
             ;; Add text properties for interaction (no mouse-face to preserve box styling)
             (setq line (propertize line
-                                   'agent-shell-workspace-buffer buf))
+                                   'agent-shell-workspace-buffer buf
+                                   'agent-shell-workspace-project key))
             (let ((start (point)))
               (insert line "\n")
               (when title
@@ -490,7 +568,8 @@ If NAME is longer than WIDTH, it will be truncated with ellipsis."
                   (insert (propertize (concat "    " shown)
                                       'face 'agent-shell-workspace-session-title
                                       'help-echo title
-                                      'agent-shell-workspace-buffer buf)
+                                      'agent-shell-workspace-buffer buf
+                                      'agent-shell-workspace-project key)
                           "\n")
                   (setq line-num (1+ line-num))))
               ;; Highlight the selected row.  Appended, so the logo and name
@@ -501,7 +580,7 @@ If NAME is longer than WIDTH, it will be truncated with ellipsis."
               (when (eq buf selected)
                 (add-face-text-property start (point)
                                         'agent-shell-workspace-selected t)))
-            (setq line-num (1+ line-num))))))
+            (setq line-num (1+ line-num))))))))
     ;; Restore cursor to selected line
     (goto-char (point-min))
     (when target-line
@@ -521,6 +600,32 @@ If NAME is longer than WIDTH, it will be truncated with ellipsis."
   "Return the agent buffer associated with the line at point."
   (get-text-property (line-beginning-position) 'agent-shell-workspace-buffer))
 
+(defun agent-shell-workspace-sidebar--project-at-point ()
+  "Return the project key for the line at point, or nil."
+  (get-text-property (line-beginning-position) 'agent-shell-workspace-project))
+
+(defun agent-shell-workspace-sidebar-toggle-project ()
+  "Collapse or expand the project group at point.
+Works from the group header or from any agent inside it."
+  (interactive)
+  (let ((key (agent-shell-workspace-sidebar--project-at-point)))
+    (unless key
+      (user-error "No project at point"))
+    (setq agent-shell-workspace-sidebar--collapsed
+          (if (member key agent-shell-workspace-sidebar--collapsed)
+              (delete key (copy-sequence agent-shell-workspace-sidebar--collapsed))
+            (cons key agent-shell-workspace-sidebar--collapsed)))
+    (agent-shell-workspace-sidebar--render)
+    ;; Land on the header we just toggled rather than wherever the rebuild
+    ;; left point.
+    (goto-char (point-min))
+    (let ((found nil))
+      (while (and (not found) (not (eobp)))
+        (if (and (equal key (agent-shell-workspace-sidebar--project-at-point))
+                 (not (agent-shell-workspace-sidebar--buffer-at-point)))
+            (setq found t)
+          (forward-line 1))))))
+
 (defun agent-shell-workspace-sidebar--row-positions ()
   "Return the start position of each agent row, in display order.
 
@@ -539,16 +644,26 @@ row starts wherever the buffer property changes."
 
 (defun agent-shell-workspace-sidebar--move (n)
   "Move N agent rows forward, or backward when N is negative.
-Stops at the ends of the list rather than wrapping."
+From a group header, move to the adjacent row in that direction rather
+than skipping one.  Stops at the ends of the list rather than wrapping."
   (when-let* ((positions (agent-shell-workspace-sidebar--row-positions)))
-    (let* ((buffers (mapcar (lambda (pos)
-                              (get-text-property pos 'agent-shell-workspace-buffer))
-                            positions))
-           (index (or (seq-position buffers
-                                    (agent-shell-workspace-sidebar--buffer-at-point))
-                      0))
-           (target (max 0 (min (1- (length positions)) (+ index n)))))
-      (goto-char (nth target positions)))))
+    (let ((here (line-beginning-position))
+          (last (1- (length positions))))
+      (if (agent-shell-workspace-sidebar--buffer-at-point)
+          ;; Inside an entry: step from the row that contains point, which is
+          ;; the last row start at or before it (an entry may span two lines).
+          (let ((index 0) (k 0))
+            (dolist (pos positions)
+              (when (<= pos here) (setq index k))
+              (setq k (1+ k)))
+            (goto-char (nth (max 0 (min last (+ index n))) positions)))
+        ;; On a group header: land on the neighbouring row.
+        (goto-char
+         (if (> n 0)
+             (or (seq-find (lambda (pos) (> pos here)) positions)
+                 (nth last positions))
+           (or (car (last (seq-filter (lambda (pos) (< pos here)) positions)))
+               (nth 0 positions))))))))
 
 (defun agent-shell-workspace-sidebar-next (&optional n)
   "Move to the next agent, skipping over session title lines.
