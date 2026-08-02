@@ -731,53 +731,57 @@ Works from the group header or from any agent inside it."
           (forward-line 1))))))
 
 (defun agent-shell-workspace-sidebar--row-positions ()
-  "Return the start position of each agent row, in display order.
+  "Return the start position of each navigable row, in display order.
 
-An entry may span more than one line once session titles are shown, so a
-row starts wherever the buffer property changes."
+Group headers count as rows, not just agents.  Collapsing a group leaves
+its header standing in for all of its agents, and collapsing every group
+leaves the sidebar with nothing but headers -- so a list built only from
+agent rows would run empty and the motion keys would go dead, with no way
+left to reach a group and expand it again.
+
+An agent entry may span more than one line once session titles are shown,
+so such a row starts wherever the buffer property changes."
   (let (positions (previous nil))
     (save-excursion
       (goto-char (point-min))
       (while (not (eobp))
         (let ((buf (agent-shell-workspace-sidebar--buffer-at-point)))
-          (when (and buf (not (eq buf previous)))
+          (when (if buf
+                    (not (eq buf previous))
+                  ;; A header carries a project but no agent.  The empty-state
+                  ;; line carries neither, and must not become a stop.
+                  (agent-shell-workspace-sidebar--project-at-point))
             (push (line-beginning-position) positions))
           (setq previous buf))
         (forward-line 1)))
     (nreverse positions)))
 
 (defun agent-shell-workspace-sidebar--move (n)
-  "Move N agent rows forward, or backward when N is negative.
-From a group header, move to the adjacent row in that direction rather
-than skipping one.  Stops at the ends of the list rather than wrapping."
+  "Move N rows forward, or backward when N is negative.
+
+Agents and group headers are both rows, so this steps through the list as
+displayed.  Stops at the ends rather than wrapping."
   (when-let* ((positions (agent-shell-workspace-sidebar--row-positions)))
     (let ((here (line-beginning-position))
-          (last (1- (length positions))))
-      (if (agent-shell-workspace-sidebar--buffer-at-point)
-          ;; Inside an entry: step from the row that contains point, which is
-          ;; the last row start at or before it (an entry may span two lines).
-          (let ((index 0) (k 0))
-            (dolist (pos positions)
-              (when (<= pos here) (setq index k))
-              (setq k (1+ k)))
-            (goto-char (nth (max 0 (min last (+ index n))) positions)))
-        ;; On a group header: land on the neighbouring row.
-        (goto-char
-         (if (> n 0)
-             (or (seq-find (lambda (pos) (> pos here)) positions)
-                 (nth last positions))
-           (or (car (last (seq-filter (lambda (pos) (< pos here)) positions)))
-               (nth 0 positions))))))))
+          (last (1- (length positions)))
+          (index 0)
+          (k 0))
+      ;; The row holding point is the last row start at or before it: an agent
+      ;; entry may span a second line for its session title.
+      (dolist (pos positions)
+        (when (<= pos here) (setq index k))
+        (setq k (1+ k)))
+      (goto-char (nth (max 0 (min last (+ index n))) positions)))))
 
 (defun agent-shell-workspace-sidebar-next (&optional n)
-  "Move to the next agent, skipping over session title lines.
-With prefix argument N, move that many agents."
+  "Move to the next agent or group header, skipping session title lines.
+With prefix argument N, move that many rows."
   (interactive "p")
   (agent-shell-workspace-sidebar--move (or n 1)))
 
 (defun agent-shell-workspace-sidebar-previous (&optional n)
-  "Move to the previous agent, skipping over session title lines.
-With prefix argument N, move that many agents."
+  "Move to the previous agent or group header, skipping session title lines.
+With prefix argument N, move that many rows."
   (interactive "p")
   (agent-shell-workspace-sidebar--move (- (or n 1))))
 
