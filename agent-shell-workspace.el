@@ -452,17 +452,26 @@ Helper to avoid duplicating color extraction logic."
   "Blend FG-COLOR with BG-COLOR using FG-WEIGHT ratio (default 30%).
 Matches the blending algorithm from agent-shell--background-tint-status-kind-label.
 FG-WEIGHT should be 0-10, where 3 means 30% foreground, 70% background."
-  (let ((fg-weight (or fg-weight 3))
-        (bg-weight (- 10 (or fg-weight 3))))
-    (when (and fg-color bg-color)
-      (apply #'format "#%02x%02x%02x"
-             (seq-mapn (lambda (f b)
-                         ;; color-values returns 16-bit (0-65535), must convert to 8-bit (0-255)
-                         (/ (+ (* (/ f 256) fg-weight)
-                               (* (/ b 256) bg-weight))
-                            10))
-                       (color-values fg-color)
-                       (color-values bg-color))))))
+  (let* ((fg-weight (or fg-weight 3))
+         (bg-weight (- 10 fg-weight))
+         ;; Guard on the resolved values, not just on the names.  A terminal
+         ;; frame reports its default background as the string
+         ;; "unspecified-bg", which is non-nil but `color-values' cannot
+         ;; parse: it returns nil, `seq-mapn' then yields nil, and the apply
+         ;; below signalled "Not enough arguments for format string", taking
+         ;; the whole sidebar render down on any tty frame.
+         (fg (and fg-color (color-values fg-color)))
+         (bg (and bg-color (color-values bg-color))))
+    (if (and fg bg)
+        (apply #'format "#%02x%02x%02x"
+               (seq-mapn (lambda (f b)
+                           ;; color-values returns 16-bit (0-65535), must convert to 8-bit (0-255)
+                           (/ (+ (* (/ f 256) fg-weight)
+                                 (* (/ b 256) bg-weight))
+                              10))
+                         fg bg))
+      ;; Nothing to blend against; the caller only needs a usable colour.
+      fg-color)))
 
 (defun agent-shell-workspace--make-logo-box (logo color-or-face)
   "Create a bordered box with LOGO in tinted background using COLOR-OR-FACE.
@@ -516,7 +525,16 @@ which `goto-char' on the buffer does not put back."
                          windows))
          (buffers (seq-filter #'buffer-live-p (agent-shell-buffers)))
          (groups (agent-shell-workspace--group-buffers buffers))
-         (selected agent-shell-workspace-sidebar--selected-buffer)
+         ;; Killing the selected agent leaves a dead buffer object here.  It
+         ;; is non-nil, so guards that only test for nil never fire and the
+         ;; sidebar stays pinned to a corpse with nothing marked.  Every path
+         ;; into the sidebar renders, so recover here rather than in each one.
+         (selected (progn
+                     (unless (buffer-live-p
+                              agent-shell-workspace-sidebar--selected-buffer)
+                       (setq agent-shell-workspace-sidebar--selected-buffer
+                             (car buffers)))
+                     agent-shell-workspace-sidebar--selected-buffer))
          (tiled agent-shell-workspace--tiled-buffers)
          (inhibit-read-only t)
          (target-line nil)
