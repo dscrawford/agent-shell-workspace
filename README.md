@@ -32,7 +32,7 @@ Toggle into an "Agents" tab with a compact sidebar, buffer isolation, and tiling
   :vc (:url "https://github.com/gveres/agent-shell-workspace")
   :ensure t
   :after agent-shell
-  :bind (:map agent-shell-command-map ("w" . agent-shell-workspace-toggle)))
+  :bind ("C-c A w" . agent-shell-workspace-toggle))
 ```
 
 ### Manual
@@ -41,7 +41,7 @@ Download `agent-shell-workspace.el`, place it in your `load-path`, then:
 
 ```elisp
 (require 'agent-shell-workspace)
-(define-key agent-shell-command-map (kbd "w") 'agent-shell-workspace-toggle)
+(global-set-key (kbd "C-c A w") 'agent-shell-workspace-toggle)
 ```
 
 ## Usage

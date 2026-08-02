@@ -28,7 +28,7 @@
 ;;
 ;; Usage:
 ;;   (require 'agent-shell-workspace)
-;;   (define-key agent-shell-command-map (kbd "w") 'agent-shell-workspace-toggle)
+;;   (global-set-key (kbd "C-c A w") 'agent-shell-workspace-toggle)
 ;;
 ;; Sidebar keybindings:
 ;;   RET   - Focus agent in main area
