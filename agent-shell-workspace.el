@@ -500,6 +500,17 @@ window showing the sidebar: `erase-buffer' resets each window's own point,
 which `goto-char' on the buffer does not put back."
   (let* ((restore (agent-shell-workspace-sidebar--entry-at-point))
          (windows (get-buffer-window-list (current-buffer) nil t))
+         ;; Capture per window, not just once from the buffer.  A window that
+         ;; is not selected keeps its own point, and the buffer's point is
+         ;; whatever it was left at -- restoring that to every window is how a
+         ;; timer tick used to yank the cursor somewhere the user never put it.
+         (window-entries
+          (mapcar (lambda (window)
+                    (cons window
+                          (save-excursion
+                            (goto-char (min (window-point window) (point-max)))
+                            (agent-shell-workspace-sidebar--entry-at-point))))
+                  windows))
          (starts (mapcar (lambda (window)
                            (cons window (window-start window)))
                          windows))
@@ -598,7 +609,15 @@ which `goto-char' on the buffer does not put back."
         (forward-line (1- target-line))))
     (dolist (window windows)
       (when (window-live-p window)
-        (set-window-point window (point))
+        ;; Each window goes back to where *it* was, falling back to the
+        ;; buffer's position when that entry is gone.
+        (set-window-point
+         window
+         (or (save-excursion
+               (when (agent-shell-workspace-sidebar--goto-entry
+                      (cdr (assq window window-entries)))
+                 (point)))
+             (point)))
         ;; Keep the view where it was so a refresh does not scroll under the
         ;; user.  Non-nil NOFORCE lets redisplay correct it if the list
         ;; shrank past this point.
@@ -837,7 +856,10 @@ Shows the buffer in the main area without moving focus."
     (with-current-buffer buf
       (unless (derived-mode-p 'agent-shell-workspace-sidebar-mode)
         (agent-shell-workspace-sidebar-mode))
-      (unless agent-shell-workspace-sidebar--selected-buffer
+      ;; `buffer-live-p', not just non-nil: killing the selected agent leaves a
+      ;; dead buffer object here, which would otherwise stick as the selection
+      ;; forever and leave nothing marked in the sidebar.
+      (unless (buffer-live-p agent-shell-workspace-sidebar--selected-buffer)
         (let ((live-buffers (seq-filter #'buffer-live-p (agent-shell-buffers))))
           (when live-buffers
             (setq agent-shell-workspace-sidebar--selected-buffer (car live-buffers)))))
@@ -1091,12 +1113,24 @@ Keeps the window showing the current buffer and deletes the rest."
 
 (defun agent-shell-workspace--setup-layout ()
   "Set up the Agents tab layout.
-Deletes other windows and shows the first agent buffer, or creates one."
+Shows the remembered selection, else the first agent buffer, else creates
+one.  The sidebar buffer outlives the tab, so closing and reopening the tab
+must not silently show a different agent than the one the sidebar marks as
+selected."
   (delete-other-windows)
-  (let ((agent-buffers (seq-filter #'buffer-live-p (agent-shell-buffers))))
-    (if agent-buffers
-        (switch-to-buffer (car agent-buffers))
-      (agent-shell)))
+  (let* ((agent-buffers (seq-filter #'buffer-live-p (agent-shell-buffers)))
+         (sidebar (get-buffer agent-shell-workspace-sidebar-buffer-name))
+         (remembered (when (buffer-live-p sidebar)
+                       (buffer-local-value
+                        'agent-shell-workspace-sidebar--selected-buffer
+                        sidebar))))
+    (cond
+     ((and remembered (buffer-live-p remembered) (memq remembered agent-buffers))
+      (switch-to-buffer remembered))
+     (agent-buffers
+      (switch-to-buffer (car agent-buffers)))
+     (t
+      (agent-shell))))
   (agent-shell-workspace-sidebar-open))
 
 ;;; Toggle command
