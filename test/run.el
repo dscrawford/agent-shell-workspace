@@ -2,9 +2,10 @@
 
 ;;; Commentary:
 
-;; Loaded by test/run.sh inside a real (non-batch) Emacs.  Runs the ERT
+;; Loaded by test/run.sh inside a real (non-batch) Emacs.  Runs the e2e
 ;; suite, writes the report to the file named by AGENT_SHELL_WORKSPACE_TEST_OUT,
-;; and exits with a status reflecting the result.
+;; and exits with a status reflecting the result.  The unit suite runs
+;; separately under --batch; see test/run.sh.
 
 ;;; Code:
 
@@ -15,7 +16,7 @@
   (add-to-list 'load-path here))
 
 (require 'agent-shell-workspace)
-(require 'agent-shell-workspace-test)
+(require 'agent-shell-workspace-e2e-test)
 
 (defun agent-shell-workspace-run-tests ()
   "Run the suite and report to the output file, then exit."
@@ -24,13 +25,15 @@
          (stats nil)
          (report ""))
     ;; A wedged test in a non-batch Emacs waits forever with nothing on
-    ;; stdout.  Report the hang instead of letting the caller time out blind.
+    ;; stdout.  Report the hang instead of letting the caller time out
+    ;; blind.  The whole suite normally finishes in well under a second,
+    ;; so 30s is already generous headroom for a slow machine.
     (run-with-timer
-     60 nil
+     30 nil
      (lambda ()
        (write-region
         (concat (with-current-buffer "*Messages*" (buffer-string))
-                "\nTIMEOUT after 60s -- the last test named above is wedged\n")
+                "\nTIMEOUT after 30s -- the last test named above is wedged\n")
         nil out)
        (kill-emacs 2)))
     ;; ERT reports through `message', which goes to *Messages* rather than

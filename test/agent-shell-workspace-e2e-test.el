@@ -1,156 +1,23 @@
-;;; agent-shell-workspace-test.el --- Tests for agent-shell-workspace -*- lexical-binding: t; -*-
+;;; agent-shell-workspace-e2e-test.el --- End-to-end tests -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; End-to-end tests for the sidebar's cursor and selection handling.
+;; End-to-end tests for window, tab and cursor behaviour.
 ;;
 ;; These must run in a real Emacs with a real frame, NOT with --batch.
 ;; Batch mode never runs redisplay and never restores a window
 ;; configuration, so `window-point' bugs are invisible there: the very
 ;; class of bug these tests exist to catch.  See test/run.sh.
+;;
+;; Pure logic tests belong in agent-shell-workspace-unit-test.el, which
+;; runs under --batch and fails fast.
 
 ;;; Code:
 
-(require 'ert)
-(require 'cl-lib)
-(require 'agent-shell-workspace)
+(require 'ert-x)
+(require 'agent-shell-workspace-test-helpers)
 
-(defvar agent-shell-workspace-test--buffers nil
-  "Fake agent buffers created for the current test.")
-
-(defun agent-shell-workspace-test--make-agent (name directory title)
-  "Create a fake agent buffer NAME in DIRECTORY with session TITLE."
-  (let ((buffer (get-buffer-create name)))
-    (with-current-buffer buffer
-      ;; The sidebar only ever asks `derived-mode-p', so this is enough of an
-      ;; agent-shell buffer without standing up an ACP process.
-      (setq major-mode 'agent-shell-mode)
-      ;; agent-shell 0.69+ additionally requires a non-nil
-      ;; `shell-maker--config' before `agent-shell-buffers' will list a
-      ;; buffer; without it every fake is filtered out and the suite
-      ;; falls through to starting a real agent.
-      (setq-local shell-maker--config (list :name "fake"))
-      (setq-local default-directory directory)
-      (setq-local agent-shell--state
-                  (list (cons :session (list (cons :title title))))))
-    (push buffer agent-shell-workspace-test--buffers)
-    buffer))
-
-(defun agent-shell-workspace-test--teardown ()
-  "Remove tabs, buffers and state left by a test."
-  ;; Bounded: if closing ever stops making progress this must fail the run,
-  ;; not spin forever.
-  (let ((guard 8))
-    (ignore-errors
-      (while (and (agent-shell-workspace--tab-exists-p) (> guard 0))
-        (setq guard (1- guard))
-        (tab-bar-switch-to-tab agent-shell-workspace--tab-name)
-        (tab-bar-close-tab))))
-  ;; Close before killing.  A side window survives `delete-other-windows' by
-  ;; design, so a test that opened the plain sidebar would otherwise leave the
-  ;; window behind displaying a killed buffer, and the next test would find a
-  ;; sidebar it never opened.
-  (ignore-errors (agent-shell-workspace-sidebar-close))
-  (when-let* ((sidebar (get-buffer agent-shell-workspace-sidebar-buffer-name)))
-    (kill-buffer sidebar))
-  (dolist (buffer agent-shell-workspace-test--buffers)
-    (when (buffer-live-p buffer)
-      (kill-buffer buffer)))
-  (setq agent-shell-workspace-test--buffers nil)
-  (setq agent-shell-workspace--previous-tab nil)
-  (delete-other-windows))
-
-(defmacro agent-shell-workspace-test--with-agents (&rest body)
-  "Run BODY with three fake agents across two projects.
-
-Stubs `agent-shell--config-icon'.  Rendering a row asks agent-shell for
-the agent's icon, which on a cache miss downloads a PNG -- and the cache
-is keyed by theme, so a light-background test frame misses whatever the
-user has cached.  Left alone that turns the suite into a network test
-that blocks forever offline.  The sidebar already falls back to a plain
-character when no icon is available."
-  (declare (indent 0))
-  `(cl-letf (((symbol-function 'agent-shell--config-icon) (lambda (&rest _) "")))
-     (unwind-protect
-         (progn
-           (tab-bar-mode 1)
-           (agent-shell-workspace-test--make-agent
-            "Claude Agent @ alpha" "/tmp/alpha/" "first alpha session")
-           (agent-shell-workspace-test--make-agent
-            "Codex Agent @ alpha" "/tmp/alpha/" "second alpha session")
-           (agent-shell-workspace-test--make-agent
-            "Claude Agent @ beta" "/tmp/beta/" "a beta session")
-           ,@body)
-       (agent-shell-workspace-test--teardown))))
-
-(defun agent-shell-workspace-test--sidebar-window ()
-  "Return the live window showing the sidebar, or nil."
-  (when-let* ((buffer (get-buffer agent-shell-workspace-sidebar-buffer-name)))
-    (get-buffer-window buffer)))
-
-(defun agent-shell-workspace-test--agent-at-window-point ()
-  "Return the agent buffer under the sidebar window's own point."
-  (when-let* ((window (agent-shell-workspace-test--sidebar-window)))
-    (with-current-buffer (window-buffer window)
-      (save-excursion
-        (goto-char (window-point window))
-        (agent-shell-workspace-sidebar--buffer-at-point)))))
-
-(defun agent-shell-workspace-test--main-window ()
-  "Return a window in the Agents tab that is not the sidebar."
-  (let ((sidebar (agent-shell-workspace-test--sidebar-window)))
-    (seq-find (lambda (window) (not (eq window sidebar))) (window-list))))
-
-(defun agent-shell-workspace-test--project-at-window-point ()
-  "Return the project key under the sidebar window's own point."
-  (when-let* ((window (agent-shell-workspace-test--sidebar-window)))
-    (with-current-buffer (window-buffer window)
-      (save-excursion
-        (goto-char (window-point window))
-        (agent-shell-workspace-sidebar--project-at-point)))))
-
-(defun agent-shell-workspace-test--park-on-header (label)
-  "Move the sidebar window's point onto the group header shown as LABEL.
-Matches on the rendered header text, so it finds the row whether the
-group is expanded or collapsed."
-  (let ((window (agent-shell-workspace-test--sidebar-window)))
-    (with-current-buffer (window-buffer window)
-      (goto-char (point-min))
-      (let ((found nil))
-        (while (and (not found) (not (eobp)))
-          (if (and (not (agent-shell-workspace-sidebar--buffer-at-point))
-                   (agent-shell-workspace-sidebar--project-at-point)
-                   (string-match-p (regexp-quote label)
-                                   (buffer-substring-no-properties
-                                    (line-beginning-position)
-                                    (line-end-position))))
-              (setq found t)
-            (forward-line 1)))
-        (should found))
-      (set-window-point window (point)))))
-
-(defun agent-shell-workspace-test--collapse (label)
-  "Collapse the group shown as LABEL through the real TAB command."
-  (agent-shell-workspace-test--park-on-header label)
-  (let ((window (agent-shell-workspace-test--sidebar-window)))
-    (with-selected-window window
-      (goto-char (window-point window))
-      (agent-shell-workspace-sidebar-toggle-project)
-      (set-window-point window (point)))))
-
-(defun agent-shell-workspace-test--park-on (name)
-  "Move the sidebar window's point onto the agent buffer called NAME."
-  (let ((window (agent-shell-workspace-test--sidebar-window))
-        (target (get-buffer name)))
-    (with-current-buffer (window-buffer window)
-      (goto-char (point-min))
-      (let ((found nil))
-        (while (and (not found) (not (eobp)))
-          (if (eq target (agent-shell-workspace-sidebar--buffer-at-point))
-              (setq found t)
-            (forward-line 1)))
-        (should found))
-      (set-window-point window (point)))))
+;;; Cursor and selection
 
 (ert-deftest agent-shell-workspace-test-cursor-survives-refresh ()
   "A refresh must not move the sidebar window's point."
@@ -181,7 +48,7 @@ group is expanded or collapsed."
   "Closing the Agents tab and reopening must restore the cursor."
   (agent-shell-workspace-test--with-agents
     (agent-shell-workspace-toggle)
-    (agent-shell-workspace-sidebar-goto-buffer-for-test "Codex Agent @ alpha")
+    (agent-shell-workspace-test--select-agent "Codex Agent @ alpha")
     (redisplay t)
     (tab-bar-close-tab)
     (redisplay t)
@@ -195,7 +62,7 @@ group is expanded or collapsed."
   "The marked selection and the agent shown in the main area must agree."
   (agent-shell-workspace-test--with-agents
     (agent-shell-workspace-toggle)
-    (agent-shell-workspace-sidebar-goto-buffer-for-test "Codex Agent @ alpha")
+    (agent-shell-workspace-test--select-agent "Codex Agent @ alpha")
     (redisplay t)
     (tab-bar-close-tab)
     (agent-shell-workspace-toggle)
@@ -209,7 +76,7 @@ group is expanded or collapsed."
   "Killing the selected agent must not wedge the selection on a dead buffer."
   (agent-shell-workspace-test--with-agents
     (agent-shell-workspace-toggle)
-    (agent-shell-workspace-sidebar-goto-buffer-for-test "Codex Agent @ alpha")
+    (agent-shell-workspace-test--select-agent "Codex Agent @ alpha")
     (kill-buffer "Codex Agent @ alpha")
     (agent-shell-workspace-sidebar-refresh)
     (redisplay t)
@@ -217,6 +84,8 @@ group is expanded or collapsed."
            (selected (buffer-local-value
                       'agent-shell-workspace-sidebar--selected-buffer sidebar)))
       (should (or (null selected) (buffer-live-p selected))))))
+
+;;; Plain sidebar
 
 (ert-deftest agent-shell-workspace-test-sidebar-toggle-makes-no-tab ()
   "The plain sidebar toggle must not create a tab or disturb the layout."
@@ -237,6 +106,8 @@ group is expanded or collapsed."
       (redisplay t)
       (should (not (agent-shell-workspace-test--sidebar-window)))
       (should (= tabs-before (length (tab-bar-tabs)))))))
+
+;;; Collapsed groups
 
 (ert-deftest agent-shell-workspace-test-collapsed-groups-stay-navigable ()
   "With every group collapsed, n/p must still move between the headers.
@@ -336,6 +207,8 @@ re-expanded, with the motion keys the sidebar binds."
         (should (equal "/tmp/alpha/"
                        (agent-shell-workspace-test--project-at-window-point)))))))
 
+;;; One-shot picker
+
 (ert-deftest agent-shell-workspace-test-pick-switches-origin-window ()
   "A one-shot pick must switch the origin window and put the sidebar away.
 
@@ -349,7 +222,7 @@ wherever you are, not for entering the workspace."
       ;; The picker takes focus so the list can be navigated immediately.
       (should (eq (selected-window)
                   (agent-shell-workspace-test--sidebar-window)))
-      (agent-shell-workspace-sidebar-goto-buffer-for-test "Codex Agent @ alpha")
+      (agent-shell-workspace-test--select-agent "Codex Agent @ alpha")
       (redisplay t)
       (should (not (agent-shell-workspace-test--sidebar-window)))
       (should (eq (selected-window) origin))
@@ -386,17 +259,220 @@ main area and keeps the sidebar up."
     (agent-shell-workspace-sidebar-toggle)
     (redisplay t)
     (should (null agent-shell-workspace-sidebar--pick-window))
-    (agent-shell-workspace-sidebar-goto-buffer-for-test "Claude Agent @ beta")
+    (agent-shell-workspace-test--select-agent "Claude Agent @ beta")
     (redisplay t)
     (should (agent-shell-workspace-test--sidebar-window))))
 
-(defun agent-shell-workspace-sidebar-goto-buffer-for-test (name)
-  "Select the agent called NAME through the real selection path."
-  (agent-shell-workspace-test--park-on name)
-  (let ((window (agent-shell-workspace-test--sidebar-window)))
-    (with-selected-window window
-      (goto-char (window-point window))
-      (agent-shell-workspace-sidebar-goto))))
+;;; Tiling
 
-(provide 'agent-shell-workspace-test)
-;;; agent-shell-workspace-test.el ends here
+(ert-deftest agent-shell-workspace-test-tiling-grid ()
+  "Adding agents tiles them into a grid; removing shrinks it back down.
+
+One mark alone is not a tile; two are.  Removing down to a single agent
+un-tiles entirely, as does the explicit `t' un-tile command."
+  (agent-shell-workspace-test--with-agents
+    (agent-shell-workspace-sidebar-toggle)
+    (redisplay t)
+    (let ((a (get-buffer "Claude Agent @ alpha"))
+          (b (get-buffer "Codex Agent @ alpha"))
+          (c (get-buffer "Claude Agent @ beta"))
+          (sidebar (get-buffer agent-shell-workspace-sidebar-buffer-name)))
+      (cl-flet ((shown () (mapcar #'window-buffer
+                                  (agent-shell-workspace-test--main-windows))))
+        (agent-shell-workspace-test--run-on
+         "Claude Agent @ alpha" #'agent-shell-workspace-tile-add)
+        (redisplay t)
+        (should (= 1 (length (shown))))
+        (agent-shell-workspace-test--run-on
+         "Codex Agent @ alpha" #'agent-shell-workspace-tile-add)
+        (redisplay t)
+        (should (seq-set-equal-p (list a b) (shown)))
+        (agent-shell-workspace-test--run-on
+         "Claude Agent @ beta" #'agent-shell-workspace-tile-add)
+        (redisplay t)
+        (should (seq-set-equal-p (list a b c) (shown)))
+        (agent-shell-workspace-test--run-on
+         "Codex Agent @ alpha" #'agent-shell-workspace-tile-remove)
+        (redisplay t)
+        (should (seq-set-equal-p (list a c) (shown)))
+        ;; Down to one: fully un-tiled.
+        (agent-shell-workspace-test--run-on
+         "Claude Agent @ beta" #'agent-shell-workspace-tile-remove)
+        (redisplay t)
+        (should (= 1 (length (shown))))
+        (should (null (buffer-local-value
+                       'agent-shell-workspace--tiled-buffers sidebar)))
+        ;; Tile again and leave through the explicit un-tile command.
+        (agent-shell-workspace-test--run-on
+         "Claude Agent @ alpha" #'agent-shell-workspace-tile-add)
+        (agent-shell-workspace-test--run-on
+         "Codex Agent @ alpha" #'agent-shell-workspace-tile-add)
+        (redisplay t)
+        (should (seq-set-equal-p (list a b) (shown)))
+        (agent-shell-workspace-test--run-on
+         "Claude Agent @ alpha" #'agent-shell-workspace-tile-toggle)
+        (redisplay t)
+        (should (= 1 (length (shown))))
+        (should (null (buffer-local-value
+                       'agent-shell-workspace--tiled-buffers sidebar)))))))
+
+;;; Quick switch
+
+(ert-deftest agent-shell-workspace-test-quick-switch-peeks-without-focus ()
+  "With quick-switch on, resting point on an agent shows it in the main
+area without taking focus from the sidebar."
+  (agent-shell-workspace-test--with-agents
+    (agent-shell-workspace-sidebar-toggle)
+    (redisplay t)
+    ;; Give the main area a known agent first, then come back.
+    (agent-shell-workspace-test--select-agent "Claude Agent @ beta")
+    (redisplay t)
+    (let ((window (agent-shell-workspace-test--sidebar-window)))
+      (select-window window)
+      (agent-shell-workspace-sidebar-toggle-quick-switch)
+      (agent-shell-workspace-test--park-on "Codex Agent @ alpha")
+      ;; Any command triggers the peek; the hook does the rest.  The pty
+      ;; that test/run.sh allocates can leave a stray event queued, and
+      ;; `ert-simulate-command' asserts the queue is empty.
+      (setq unread-command-events nil)
+      (with-selected-window window
+        (ert-simulate-command '(ignore)))
+      (redisplay t)
+      (should (eq (selected-window) window))
+      (should (eq (get-buffer "Codex Agent @ alpha")
+                  (window-buffer (agent-shell-workspace-test--main-window)))))))
+
+(ert-deftest agent-shell-workspace-test-click-selects-agent ()
+  "A mouse click on a row selects that agent, same as RET."
+  (agent-shell-workspace-test--with-agents
+    (agent-shell-workspace-sidebar-toggle)
+    (redisplay t)
+    (agent-shell-workspace-test--park-on "Claude Agent @ beta")
+    (let* ((window (agent-shell-workspace-test--sidebar-window))
+           (posn (posn-at-point (window-point window) window)))
+      (agent-shell-workspace-sidebar-click (list 'mouse-1 posn))
+      (redisplay t)
+      (should (eq (get-buffer "Claude Agent @ beta")
+                  (window-buffer (agent-shell-workspace-test--main-window)))))))
+
+;;; Agent management
+
+(ert-deftest agent-shell-workspace-test-kill-sends-eof ()
+  "Killing an agent with a live process sends it EOF in its own buffer."
+  (agent-shell-workspace-test--with-agents
+    (let ((live (agent-shell-workspace-test--make-live-agent
+                 "Claude Agent @ live" "/tmp/live/"))
+          (calls nil))
+      ;; The real `shell-maker-busy' wants a genuine shell-maker-config
+      ;; struct, which the fakes do not carry, and rendering a live fake
+      ;; reaches it through the status check.
+      (cl-letf (((symbol-function 'shell-maker-busy) (lambda (&rest _) nil))
+                ((symbol-function 'comint-send-eof)
+                 (lambda () (push (current-buffer) calls)))
+                ((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+        (agent-shell-workspace-sidebar-toggle)
+        (redisplay t)
+        (agent-shell-workspace-test--run-on
+         "Claude Agent @ live" #'agent-shell-workspace-sidebar-kill))
+      (should (equal (list live) calls)))))
+
+(ert-deftest agent-shell-workspace-test-rename-preserves-prefix ()
+  "Renaming only changes the post-@ portion of the buffer name."
+  (agent-shell-workspace-test--with-agents
+    (agent-shell-workspace-sidebar-toggle)
+    (redisplay t)
+    (cl-letf (((symbol-function 'read-string)
+               (lambda (&rest _) "renamed")))
+      (agent-shell-workspace-test--run-on
+       "Codex Agent @ alpha" #'agent-shell-workspace-sidebar-rename))
+    (should (get-buffer "Codex Agent @ renamed"))
+    (should (null (get-buffer "Codex Agent @ alpha")))))
+
+(ert-deftest agent-shell-workspace-test-delete-killed-buffers ()
+  "The plain fixtures have no process, so every one of them reads as
+killed and `d' sweeps them all away."
+  (agent-shell-workspace-test--with-agents
+    (agent-shell-workspace-sidebar-toggle)
+    (redisplay t)
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+      (with-selected-window (agent-shell-workspace-test--sidebar-window)
+        (agent-shell-workspace-sidebar-delete-killed)))
+    (redisplay t)
+    (should (null (seq-filter #'buffer-live-p
+                              agent-shell-workspace-test--buffers)))))
+
+(ert-deftest agent-shell-workspace-test-management-commands-delegate ()
+  "Set-mode, cycle-mode and interrupt run inside the agent at point, and
+restart falls back to a fresh `agent-shell' when the config is unknown."
+  (agent-shell-workspace-test--with-agents
+    (agent-shell-workspace-sidebar-toggle)
+    (redisplay t)
+    (let ((target (get-buffer "Codex Agent @ alpha"))
+          (calls nil))
+      (cl-letf (((symbol-function 'agent-shell-set-session-mode)
+                 (lambda (&rest _) (push (cons 'set (current-buffer)) calls)))
+                ((symbol-function 'agent-shell-cycle-session-mode)
+                 (lambda (&rest _) (push (cons 'cycle (current-buffer)) calls)))
+                ((symbol-function 'agent-shell-interrupt)
+                 (lambda (&rest _) (push (cons 'interrupt (current-buffer)) calls)))
+                ((symbol-function 'agent-shell)
+                 (lambda (&rest args) (push (cons 'new args) calls)))
+                ((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+        (agent-shell-workspace-test--run-on
+         "Codex Agent @ alpha" #'agent-shell-workspace-sidebar-set-mode)
+        (agent-shell-workspace-test--run-on
+         "Codex Agent @ alpha" #'agent-shell-workspace-sidebar-cycle-mode)
+        (agent-shell-workspace-test--run-on
+         "Codex Agent @ alpha" #'agent-shell-workspace-sidebar-interrupt)
+        (should (equal (list (cons 'set target)
+                             (cons 'cycle target)
+                             (cons 'interrupt target))
+                       (reverse calls)))
+        (let ((agent-shell-agent-configs '()))
+          (agent-shell-workspace-test--run-on
+           "Codex Agent @ alpha" #'agent-shell-workspace-sidebar-restart))
+        (should (equal (cons 'new '(t)) (car calls)))
+        (should-not (buffer-live-p target))))))
+
+;;; Workspace tab and isolation
+
+(ert-deftest agent-shell-workspace-test-toggle-returns-to-previous-tab ()
+  (agent-shell-workspace-test--with-agents
+    (let ((home (alist-get 'name (tab-bar--current-tab))))
+      (agent-shell-workspace-toggle)
+      (redisplay t)
+      (should (agent-shell-workspace--in-agents-tab-p))
+      (agent-shell-workspace-toggle)
+      (redisplay t)
+      (should-not (agent-shell-workspace--in-agents-tab-p))
+      (should (equal home (alist-get 'name (tab-bar--current-tab)))))))
+
+(ert-deftest agent-shell-workspace-test-isolation-redirects-non-agents ()
+  "Displaying a non-agent buffer from the Agents tab lands in the
+previous tab, through both the advice path and the display-buffer path."
+  (agent-shell-workspace-test--with-agents
+    (agent-shell-workspace-toggle)
+    (redisplay t)
+    (should (agent-shell-workspace--in-agents-tab-p))
+    (switch-to-buffer "*scratch*")
+    (redisplay t)
+    (should-not (agent-shell-workspace--in-agents-tab-p))
+    (should (eq (window-buffer) (get-buffer "*scratch*")))
+    ;; Same again through display-buffer, from inside the tab.
+    (agent-shell-workspace-toggle)
+    (redisplay t)
+    (should (agent-shell-workspace--in-agents-tab-p))
+    (display-buffer "*scratch*")
+    (redisplay t)
+    (should-not (agent-shell-workspace--in-agents-tab-p))))
+
+;;; Rendering on a real frame
+
+(ert-deftest agent-shell-workspace-test-blend-color-mixes-on-real-frame ()
+  "Blending needs `color-values', which only resolves on a real frame;
+the batch suite can only cover the fallback path."
+  (should (equal "#4c0000"
+                 (agent-shell-workspace--blend-color "#ff0000" "#000000" 3))))
+
+(provide 'agent-shell-workspace-e2e-test)
+;;; agent-shell-workspace-e2e-test.el ends here

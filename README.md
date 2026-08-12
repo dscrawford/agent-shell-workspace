@@ -82,6 +82,16 @@ Press `a` on each agent you want to tile. The first press marks the agent (shown
 
 While in the Agents tab, any attempt to display a non-agent buffer (via `find-file`, `xref`, `switch-to-buffer`, etc.) automatically switches you to your previous tab first. Agent-related buffers (diffs, traffic logs) are allowed through.
 
+## Development
+
+Run the test suites with:
+
+```sh
+test/run.sh
+```
+
+This runs two phases: a unit suite under `emacs --batch` (pure logic — status detection, grouping, parsing), then an end-to-end suite in a real terminal Emacs, because window-point and redisplay bugs do not reproduce in batch mode. The whole run takes about a second and a half.
+
 ## Acknowledgements
 
 Status detection logic adapted from [agent-shell-manager.el](https://github.com/jethrokuan) by Jethro Kuan.
