@@ -16,6 +16,7 @@ Toggle into an "Agents" tab with a compact sidebar, buffer isolation, and tiling
 - **Buffer isolation** — opening a file or switching to a non-agent buffer auto-redirects to your editing tab
 - **Tiling** — view 2–8 agents side-by-side in an auto-arranged grid
 - **Quick switch** — peek at agents by moving up/down in the sidebar without losing focus
+- **One-shot picker** — pop the list up, pick an agent, and the current window jumps to it
 - **Agent management** — kill, restart, rename, set mode, interrupt — all from the sidebar
 
 ## Requirements
@@ -32,7 +33,8 @@ Toggle into an "Agents" tab with a compact sidebar, buffer isolation, and tiling
   :vc (:url "https://github.com/gveres/agent-shell-workspace")
   :ensure t
   :after agent-shell
-  :bind ("C-c A w" . agent-shell-workspace-toggle))
+  :bind (("C-c A w" . agent-shell-workspace-toggle)
+         ("C-c A p" . agent-shell-workspace-pick)))
 ```
 
 ### Manual
@@ -47,6 +49,10 @@ Download `agent-shell-workspace.el`, place it in your `load-path`, then:
 ## Usage
 
 Press `C-c A w` (or your configured binding) to toggle the workspace. The Agents tab opens with a sidebar on the left and your most recent agent in the main area.
+
+### One-shot picker
+
+`agent-shell-workspace-pick` (`C-c A p` above) pops the sidebar up as a one-time picker: navigate to an agent and press `RET` (or click), and the window you came from switches to that agent while the sidebar closes again. Press `q` to cancel and return to where you were. No tab is created and your window layout is left alone — it's a quick jump to an agent from wherever you are.
 
 ### Sidebar keybindings
 

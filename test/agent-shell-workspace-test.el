@@ -25,6 +25,11 @@
       ;; The sidebar only ever asks `derived-mode-p', so this is enough of an
       ;; agent-shell buffer without standing up an ACP process.
       (setq major-mode 'agent-shell-mode)
+      ;; agent-shell 0.69+ additionally requires a non-nil
+      ;; `shell-maker--config' before `agent-shell-buffers' will list a
+      ;; buffer; without it every fake is filtered out and the suite
+      ;; falls through to starting a real agent.
+      (setq-local shell-maker--config (list :name "fake"))
       (setq-local default-directory directory)
       (setq-local agent-shell--state
                   (list (cons :session (list (cons :title title))))))
@@ -330,6 +335,60 @@ re-expanded, with the motion keys the sidebar binds."
         (should (null (agent-shell-workspace-test--agent-at-window-point)))
         (should (equal "/tmp/alpha/"
                        (agent-shell-workspace-test--project-at-window-point)))))))
+
+(ert-deftest agent-shell-workspace-test-pick-switches-origin-window ()
+  "A one-shot pick must switch the origin window and put the sidebar away.
+
+No tab may be created: the picker is for jumping to an agent from
+wherever you are, not for entering the workspace."
+  (agent-shell-workspace-test--with-agents
+    (let ((origin (selected-window))
+          (tabs-before (length (tab-bar-tabs))))
+      (agent-shell-workspace-pick)
+      (redisplay t)
+      ;; The picker takes focus so the list can be navigated immediately.
+      (should (eq (selected-window)
+                  (agent-shell-workspace-test--sidebar-window)))
+      (agent-shell-workspace-sidebar-goto-buffer-for-test "Codex Agent @ alpha")
+      (redisplay t)
+      (should (not (agent-shell-workspace-test--sidebar-window)))
+      (should (eq (selected-window) origin))
+      (should (eq (window-buffer origin) (get-buffer "Codex Agent @ alpha")))
+      (should (= tabs-before (length (tab-bar-tabs)))))))
+
+(ert-deftest agent-shell-workspace-test-pick-quit-cancels ()
+  "Quitting a pick must close the sidebar, refocus the origin untouched,
+and leave no pending pick behind to redirect a later selection."
+  (agent-shell-workspace-test--with-agents
+    (let ((origin (selected-window))
+          (before (window-buffer (selected-window))))
+      (agent-shell-workspace-pick)
+      (redisplay t)
+      (with-selected-window (agent-shell-workspace-test--sidebar-window)
+        (agent-shell-workspace-sidebar-quit))
+      (redisplay t)
+      (should (not (agent-shell-workspace-test--sidebar-window)))
+      (should (eq (selected-window) origin))
+      (should (eq (window-buffer origin) before))
+      (should (null agent-shell-workspace-sidebar--pick-window)))))
+
+(ert-deftest agent-shell-workspace-test-abandoned-pick-does-not-redirect ()
+  "A pick abandoned without `q' must not hijack a later plain-sidebar RET.
+
+The pick window is cleared on every non-pick open, so reopening the
+sidebar through the toggle behaves normally: RET shows the agent in the
+main area and keeps the sidebar up."
+  (agent-shell-workspace-test--with-agents
+    (agent-shell-workspace-pick)
+    (redisplay t)
+    ;; Abandon by closing through the toggle, then reopen it plainly.
+    (agent-shell-workspace-sidebar-toggle)
+    (agent-shell-workspace-sidebar-toggle)
+    (redisplay t)
+    (should (null agent-shell-workspace-sidebar--pick-window))
+    (agent-shell-workspace-sidebar-goto-buffer-for-test "Claude Agent @ beta")
+    (redisplay t)
+    (should (agent-shell-workspace-test--sidebar-window))))
 
 (defun agent-shell-workspace-sidebar-goto-buffer-for-test (name)
   "Select the agent called NAME through the real selection path."

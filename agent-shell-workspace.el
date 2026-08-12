@@ -29,6 +29,12 @@
 ;; Usage:
 ;;   (require 'agent-shell-workspace)
 ;;   (global-set-key (kbd "C-c A w") 'agent-shell-workspace-toggle)
+;;   (global-set-key (kbd "C-c A p") 'agent-shell-workspace-pick)
+;;
+;; `agent-shell-workspace-pick' is a one-shot picker: it pops the sidebar
+;; up, and choosing an agent (RET or mouse) switches the window you came
+;; from to that agent and closes the sidebar again.  No tab, no layout
+;; takeover -- just a quick jump to an agent from wherever you are.
 ;;
 ;; Sidebar keybindings:
 ;;   RET   - Focus agent in main area
@@ -312,6 +318,12 @@ one-line-per-agent list.")
 Moving up/down in the sidebar automatically shows the agent at
 point in the main area without stealing focus.")
 
+(defvar agent-shell-workspace-sidebar--pick-window nil
+  "Window a one-shot pick will switch, or nil when no pick is active.
+Set by `agent-shell-workspace-pick', consumed by the next selection,
+and cleared whenever the sidebar is opened or closed by other means
+so it cannot go stale.")
+
 ;;;; Display helpers
 
 (defun agent-shell-workspace--agent-icon (buffer)
@@ -408,7 +420,7 @@ Returns the portion after \" @ \" if present, otherwise the full name."
     (define-key map (kbd "<up>") #'agent-shell-workspace-sidebar-previous)
     (define-key map (kbd "TAB") #'agent-shell-workspace-sidebar-toggle-project)
     (define-key map (kbd "<tab>") #'agent-shell-workspace-sidebar-toggle-project)
-    (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "q") #'agent-shell-workspace-sidebar-quit)
     map)
   "Keymap for `agent-shell-workspace-sidebar-mode'.")
 
@@ -787,28 +799,46 @@ With prefix argument N, move that many rows."
 
 ;;;; Interaction commands
 
+(defun agent-shell-workspace--main-window ()
+  "Return the first window that is neither a side window nor the sidebar."
+  (let ((target nil))
+    (walk-windows
+     (lambda (win)
+       (when (and (not target)
+                  (not (window-parameter win 'window-side))
+                  (not (string= (buffer-name (window-buffer win))
+                                agent-shell-workspace-sidebar-buffer-name)))
+         (setq target win)))
+     nil nil)
+    target))
+
 (defun agent-shell-workspace-sidebar-goto ()
-  "Focus the agent buffer at point in the main area."
+  "Focus the agent buffer at point in the main area.
+During a one-shot pick (`agent-shell-workspace-pick'), show it in the
+window the pick started from and close the sidebar instead."
   (interactive)
-  (let ((buf (agent-shell-workspace-sidebar--buffer-at-point)))
+  (let ((buf (agent-shell-workspace-sidebar--buffer-at-point))
+        (origin agent-shell-workspace-sidebar--pick-window))
     (unless (and buf (buffer-live-p buf))
       (user-error "No live agent buffer at point"))
     (setq agent-shell-workspace-sidebar--selected-buffer buf)
     (agent-shell-workspace--clear-finished buf)
-    ;; Find a non-sidebar window and display the buffer there
-    (let ((target-window nil))
-      (walk-windows
-       (lambda (win)
-         (when (and (not target-window)
-                    (not (window-parameter win 'window-side))
-                    (not (string= (buffer-name (window-buffer win))
-                                  agent-shell-workspace-sidebar-buffer-name)))
-           (setq target-window win)))
-       nil nil)
-      (when target-window
-        (set-window-buffer target-window buf)
-        (select-window target-window)))
-    (agent-shell-workspace-sidebar-refresh)))
+    (cond
+     (origin
+      ;; Close first: it clears the pick state, and deleting the side
+      ;; window cannot disturb the origin window's new buffer.
+      (agent-shell-workspace-sidebar-close)
+      (if (window-live-p origin)
+          (progn
+            (set-window-buffer origin buf)
+            (select-window origin))
+        ;; The origin died while the picker was up; any window will do.
+        (pop-to-buffer buf)))
+     (t
+      (when-let* ((window (agent-shell-workspace--main-window)))
+        (set-window-buffer window buf)
+        (select-window window))
+      (agent-shell-workspace-sidebar-refresh)))))
 
 (defun agent-shell-workspace-sidebar-click (event)
   "Handle mouse click EVENT in the sidebar."
@@ -844,23 +874,17 @@ Shows the buffer in the main area without moving focus."
         (setq agent-shell-workspace-sidebar--selected-buffer buf)
         (agent-shell-workspace--clear-finished buf)
         ;; Show in main area without moving focus
-        (let ((target-window nil))
-          (walk-windows
-           (lambda (win)
-             (when (and (not target-window)
-                        (not (window-parameter win 'window-side))
-                        (not (string= (buffer-name (window-buffer win))
-                                      agent-shell-workspace-sidebar-buffer-name)))
-               (setq target-window win)))
-           nil nil)
-          (when target-window
-            (set-window-buffer target-window buf)))
+        (when-let* ((target-window (agent-shell-workspace--main-window)))
+          (set-window-buffer target-window buf))
         (agent-shell-workspace-sidebar--render)))))
 
 ;;;; Sidebar open
 
 (defun agent-shell-workspace-sidebar-open ()
   "Open the agent workspace sidebar."
+  ;; Any non-pick path into the sidebar cancels a pending pick, so a
+  ;; pick the user abandoned cannot redirect a later RET.
+  (setq agent-shell-workspace-sidebar--pick-window nil)
   (let* ((buf (get-buffer-create agent-shell-workspace-sidebar-buffer-name))
          (window (get-buffer-window buf)))
     (unless (and window (window-live-p window))
@@ -891,6 +915,7 @@ Shows the buffer in the main area without moving focus."
 (defun agent-shell-workspace-sidebar-close ()
   "Hide the agent sidebar in the current frame."
   (interactive)
+  (setq agent-shell-workspace-sidebar--pick-window nil)
   (when-let* ((window (get-buffer-window
                        agent-shell-workspace-sidebar-buffer-name)))
     (when (window-live-p window)
@@ -909,6 +934,37 @@ just a side window alongside whatever you are already working on."
   (if (get-buffer-window agent-shell-workspace-sidebar-buffer-name)
       (agent-shell-workspace-sidebar-close)
     (agent-shell-workspace-sidebar-open)))
+
+;;;###autoload
+(defun agent-shell-workspace-pick ()
+  "Pop up the sidebar as a one-shot agent picker.
+
+Choosing an agent (RET or mouse) switches the window this command was
+invoked from to that agent and closes the sidebar again.  `q' cancels.
+Unlike `agent-shell-workspace-toggle', no tab is created and the window
+layout is left alone."
+  (interactive)
+  (let* ((selected (selected-window))
+         ;; Picking from a window that cannot take the agent buffer --
+         ;; the minibuffer, a dedicated window, a side window such as the
+         ;; sidebar itself -- targets the main area instead.
+         (origin (if (or (window-minibuffer-p selected)
+                         (window-dedicated-p selected)
+                         (window-parameter selected 'window-side))
+                     (agent-shell-workspace--main-window)
+                   selected))
+         (window (agent-shell-workspace-sidebar-open)))
+    (setq agent-shell-workspace-sidebar--pick-window origin)
+    (when (window-live-p window)
+      (select-window window))))
+
+(defun agent-shell-workspace-sidebar-quit ()
+  "Close the sidebar.  Cancelling a one-shot pick refocuses its origin."
+  (interactive)
+  (let ((origin agent-shell-workspace-sidebar--pick-window))
+    (agent-shell-workspace-sidebar-close)
+    (when (window-live-p origin)
+      (select-window origin))))
 
 ;;;; Agent management commands
 
