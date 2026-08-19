@@ -14,6 +14,7 @@ Toggle into an "Agents" tab with a compact sidebar, buffer isolation, and tiling
 - **Compact sidebar** — shows each agent's icon, status, and name at a glance
 - **Status icons** — `●` ready, `◐` working, `◉` waiting for input (red), `✔` finished (cyan), `○` initializing, `✕` killed
 - **Working spinner** — rows for busy agents animate (`◐ ◓ ◑ ◒`) so you can see who's actively working
+- **Live activity summary** — beneath each row, a small-print summary shows the session title, or — while the agent is busy — the latest tool-call title ("Reading foo.el", "Running tests"), wrapped onto up to two lines
 - **Buffer isolation** — opening a file or switching to a non-agent buffer auto-redirects to your editing tab
 - **Tiling** — view 2–8 agents side-by-side in an auto-arranged grid
 - **Quick switch** — peek at agents by moving up/down in the sidebar without losing focus
@@ -80,6 +81,10 @@ Press `C-c A w` (or your configured binding) to toggle the workspace. The Agents
 | `C-c C-c` | Interrupt agent |
 | `g` | Refresh sidebar |
 | `q` | Close sidebar |
+
+### Summary lines
+
+Each agent row carries a summary underneath in smaller print: the session title when idle, or the latest tool-call title while the agent is working — a live glimpse of what the model is doing. Summaries wrap onto up to two lines. Tune with `agent-shell-workspace-sidebar-summary-height` (relative font height, default 0.85), `agent-shell-workspace-sidebar-summary-indent` (left margin, default 5), and `agent-shell-workspace-sidebar-summary-lines` (max lines, default 2), or set `agent-shell-workspace-sidebar-show-session-title` to nil to hide them entirely.
 
 ### Tiling
 

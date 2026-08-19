@@ -202,6 +202,38 @@ Two projects sharing a basename must stay separate groups."
       (should (null (agent-shell-workspace--session-title blank)))
       (should (null (agent-shell-workspace--session-title absent))))))
 
+(ert-deftest agent-shell-workspace-unit-activity-reads-latest-tool-call ()
+  "The newest tool call's title, first line only; nil when absent or blank."
+  (agent-shell-workspace-test--with-fixture
+    (let ((busy (agent-shell-workspace-test--make-agent
+                 "Claude Agent @ busy" "/tmp/busy/" "t"
+                 (cons :tool-calls
+                       (list (cons 2 (list :title " Running tests \ndetail"))
+                             (cons 1 (list :title "Read foo.el"))))))
+          (untitled (agent-shell-workspace-test--make-agent
+                     "Claude Agent @ untitled" "/tmp/untitled/" "t"
+                     (cons :tool-calls (list (cons 1 (list :title "  "))))))
+          (idle (agent-shell-workspace-test--make-agent
+                 "Claude Agent @ idle" "/tmp/idle/" "t")))
+      (should (equal "Running tests" (agent-shell-workspace--activity busy)))
+      (should (null (agent-shell-workspace--activity untitled)))
+      (should (null (agent-shell-workspace--activity idle))))))
+
+(ert-deftest agent-shell-workspace-unit-wrap-summary ()
+  "Word-wraps to the line limit, ellipsizes overflow, cuts giant words."
+  (should (equal '("short") (agent-shell-workspace--wrap-summary "short" 10 2)))
+  (should (equal '("aaaa bbbb" "cccc")
+                 (agent-shell-workspace--wrap-summary "aaaa bbbb cccc" 10 2)))
+  (should (equal '("aaaa bbbb" "cccc dddd…")
+                 (agent-shell-workspace--wrap-summary
+                  "aaaa bbbb cccc dddd eeee" 10 2)))
+  ;; A single word longer than the budget is cut, not left to overflow.
+  (should (equal '("abcdefghij" "klm")
+                 (agent-shell-workspace--wrap-summary "abcdefghijklm" 10 2)))
+  (should (equal '("abc…")
+                 (agent-shell-workspace--wrap-summary "abcdefgh" 4 1)))
+  (should (equal '() (agent-shell-workspace--wrap-summary "   " 10 2))))
+
 ;;; Config resolution
 
 (ert-deftest agent-shell-workspace-unit-config-resolution ()

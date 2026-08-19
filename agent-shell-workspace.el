@@ -61,6 +61,7 @@
 ;;; Code:
 
 (require 'agent-shell)
+(require 'cl-lib)
 (require 'tab-bar)
 (require 'hl-line)
 (require 'map)
@@ -254,6 +255,20 @@ the first non-blank line only."
               ((not (string-blank-p line))))
     (string-trim line)))
 
+(defun agent-shell-workspace--activity (buffer)
+  "Return the title of BUFFER's most recent tool call, or nil.
+
+agent-shell stores `:tool-calls' most recent first, and ACP agents send
+a human-readable title with every call (\"Read foo.el\", \"Running
+tests\") -- as close to what the model is doing right now as the
+protocol offers."
+  (when-let* ((state (buffer-local-value 'agent-shell--state buffer))
+              (tool-calls (map-elt state :tool-calls))
+              (title (map-elt (cdar tool-calls) :title))
+              ((stringp title))
+              ((not (string-blank-p title))))
+    (string-trim (car (split-string title "\n")))))
+
 (defun agent-shell-workspace--resolved-agent-configs ()
   "Return `agent-shell-agent-configs' with maker entries realized.
 
@@ -307,11 +322,22 @@ again.  Set to nil for a plain sidebar that keeps its window up and
 leaves focus where it was.")
 
 (defvar agent-shell-workspace-sidebar-show-session-title t
-  "When non-nil, show each agent's session title beneath its row.
+  "When non-nil, show a summary line beneath each agent's row.
 
-Several agents in one project all render the same short name, so the
-title is often the only thing telling them apart.  Set to nil for a
-one-line-per-agent list.")
+For an idle agent this is the session title; for a working or waiting
+agent it is the latest tool-call title -- what the model is doing right
+now.  Several agents in one project all render the same short name, so
+the summary is often the only thing telling them apart.  Set to nil for
+a one-line-per-agent list.")
+
+(defvar agent-shell-workspace-sidebar-summary-height 0.85
+  "Relative font height of the summary lines beneath each agent.")
+
+(defvar agent-shell-workspace-sidebar-summary-indent 5
+  "Left margin, in characters, of the summary lines.")
+
+(defvar agent-shell-workspace-sidebar-summary-lines 2
+  "Maximum number of lines a summary may wrap onto.")
 
 (defvar-local agent-shell-workspace-sidebar--refresh-timer nil
   "Timer for auto-refreshing the sidebar.")
@@ -549,6 +575,41 @@ If NAME is longer than WIDTH, it will be truncated with ellipsis."
                 'face `(:foreground ,fg
                         :box (:line-width 1 :color ,fg)))))
 
+(defun agent-shell-workspace--wrap-summary (text budget max-lines)
+  "Word-wrap TEXT into at most MAX-LINES lines of BUDGET characters.
+Overflow past the last permitted line is ellipsized.  A single word
+longer than BUDGET is cut mid-word rather than allowed to push past the
+sidebar edge and desync the line count."
+  (let ((remaining (string-trim text))
+        (lines nil))
+    (while (and (< (length lines) max-lines)
+                (not (string-empty-p remaining)))
+      (if (<= (length remaining) budget)
+          (progn (push remaining lines)
+                 (setq remaining ""))
+        (let* ((limit (min (1+ budget) (length remaining)))
+               (break (cl-position ?\s remaining :from-end t :end limit))
+               (cut (if (and break (> break 0)) break budget))
+               (line (string-trim (substring remaining 0 cut))))
+          (setq remaining (string-trim (substring remaining cut)))
+          (when (and (= (1+ (length lines)) max-lines)
+                     (not (string-empty-p remaining)))
+            (setq line (concat (substring line 0 (min (length line) (1- budget)))
+                               "…"))
+            (setq remaining ""))
+          (push line lines))))
+    (nreverse lines)))
+
+(defun agent-shell-workspace--summary-budget ()
+  "Return the character budget of one summary line.
+The summary face is scaled down, so more characters fit per column than
+the window width says; a tty ignores the scaling, so count plainly there."
+  (let ((scale (if (display-graphic-p)
+                   agent-shell-workspace-sidebar-summary-height
+                 1.0)))
+    (max 8 (- (floor (/ (- agent-shell-workspace-sidebar-width 2) scale))
+              agent-shell-workspace-sidebar-summary-indent))))
+
 (defun agent-shell-workspace-sidebar--render ()
   "Render the sidebar contents, grouped by project.
 
@@ -640,8 +701,13 @@ which `goto-char' on the buffer does not put back."
                             ""))
                  (line (concat selection-indicator " " logo-box name-box-styled
                                spinner tile-indicator))
+                 ;; While the agent is busy, the latest tool-call title is a
+                 ;; live "what it is doing" summary; otherwise fall back to
+                 ;; the session title.
                  (title (when agent-shell-workspace-sidebar-show-session-title
-                          (agent-shell-workspace--session-title buf))))
+                          (or (and (member status '("working" "waiting"))
+                                   (agent-shell-workspace--activity buf))
+                              (agent-shell-workspace--session-title buf)))))
             (when (string= status "working")
               (setq agent-shell-workspace-sidebar--animating t))
             ;; Track selected line for cursor positioning
@@ -654,21 +720,27 @@ which `goto-char' on the buffer does not put back."
             (let ((start (point)))
               (insert line "\n")
               (when title
-                ;; Indent under the row and truncate to the sidebar width, so a
-                ;; long seeded prompt cannot wrap and desync the line count.
-                ;; Carries the same buffer property as the row above it, so
+                ;; Indented under the row in a scaled-down face, wrapped to at
+                ;; most `agent-shell-workspace-sidebar-summary-lines' lines and
+                ;; hard-truncated to the budget so a long seeded prompt cannot
+                ;; wrap on its own and desync the line count.  Every line
+                ;; carries the same buffer property as the row above it, so
                 ;; clicking or resting point here still resolves to the agent.
-                (let* ((budget (max 8 (- agent-shell-workspace-sidebar-width 5)))
-                       (shown (if (> (length title) budget)
-                                  (concat (substring title 0 (1- budget)) "…")
-                                title)))
-                  (insert (propertize (concat "    " shown)
-                                      'face 'agent-shell-workspace-session-title
-                                      'help-echo title
-                                      'agent-shell-workspace-buffer buf
-                                      'agent-shell-workspace-project key)
-                          "\n")
-                  (setq line-num (1+ line-num))))
+                (let ((indent (make-string
+                               agent-shell-workspace-sidebar-summary-indent ?\s)))
+                  (dolist (shown (agent-shell-workspace--wrap-summary
+                                  title
+                                  (agent-shell-workspace--summary-budget)
+                                  agent-shell-workspace-sidebar-summary-lines))
+                    (insert (propertize
+                             (concat indent shown)
+                             'face `(:inherit agent-shell-workspace-session-title
+                                     :height ,agent-shell-workspace-sidebar-summary-height)
+                             'help-echo title
+                             'agent-shell-workspace-buffer buf
+                             'agent-shell-workspace-project key)
+                            "\n")
+                    (setq line-num (1+ line-num)))))
               ;; Highlight the selected row.  Appended, so the logo and name
               ;; boxes keep their own backgrounds and only the rest of the row
               ;; picks up the selection background.  The region includes the

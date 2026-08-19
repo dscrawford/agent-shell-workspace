@@ -329,6 +329,49 @@ the window the pick came from, leaving its buffer untouched."
       (agent-shell-workspace-sidebar--spin)
       (should (= frame-before agent-shell-workspace--working-frame)))))
 
+;;; Summary lines
+
+(ert-deftest agent-shell-workspace-test-working-agent-shows-activity ()
+  "A working agent's summary line is its latest tool-call title, not the
+session title."
+  (agent-shell-workspace-test--with-agents
+    (agent-shell-workspace-test--make-live-agent
+     "Claude Agent @ busy" "/tmp/busy/"
+     (cons :tool-calls
+           (list (cons 1 (list :status "in_progress"
+                               :title "Reading foo.el")))))
+    (agent-shell-workspace-test--toggle-plain)
+    (redisplay t)
+    (let ((rendered (with-current-buffer agent-shell-workspace-sidebar-buffer-name
+                      (buffer-substring-no-properties (point-min) (point-max)))))
+      (should (string-match-p "Reading foo.el" rendered))
+      (should-not (string-match-p "live session" rendered)))))
+
+(ert-deftest agent-shell-workspace-test-long-summary-wraps-to-two-lines ()
+  "A long summary wraps onto a second indented line instead of truncating
+straight away; the wrapped lines still resolve to their agent."
+  (agent-shell-workspace-test--with-fixture
+    (cl-letf (((symbol-function 'agent-shell--config-icon) (lambda (&rest _) "")))
+      (tab-bar-mode 1)
+      (let ((agent (agent-shell-workspace-test--make-agent
+                    "Claude Agent @ wordy" "/tmp/wordy/"
+                    "refactor the sidebar renderer and update the tests")))
+        (agent-shell-workspace-test--toggle-plain)
+        (redisplay t)
+        (with-current-buffer agent-shell-workspace-sidebar-buffer-name
+          (let ((entry-lines 0))
+            (save-excursion
+              (goto-char (point-min))
+              (while (not (eobp))
+                (when (eq agent (agent-shell-workspace-sidebar--buffer-at-point))
+                  (setq entry-lines (1+ entry-lines)))
+                (forward-line 1)))
+            ;; The agent's row plus two wrapped summary lines.
+            (should (= 3 entry-lines))
+            (should (string-match-p "refactor the"
+                                    (buffer-substring-no-properties
+                                     (point-min) (point-max))))))))))
+
 ;;; Tiling
 
 (ert-deftest agent-shell-workspace-test-tiling-grid ()
