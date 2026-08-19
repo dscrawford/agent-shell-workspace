@@ -92,7 +92,7 @@
   (agent-shell-workspace-test--with-agents
     (let ((tabs-before (length (tab-bar-tabs)))
           (buffer-before (window-buffer (selected-window))))
-      (agent-shell-workspace-sidebar-toggle)
+      (agent-shell-workspace-test--toggle-plain)
       (redisplay t)
       (should (agent-shell-workspace-test--sidebar-window))
       ;; A real side window, not a tab and not a takeover of the layout.
@@ -102,7 +102,7 @@
       (should (not (agent-shell-workspace--tab-exists-p)))
       (should (eq buffer-before (window-buffer (selected-window))))
       ;; Toggling again puts it away.
-      (agent-shell-workspace-sidebar-toggle)
+      (agent-shell-workspace-test--toggle-plain)
       (redisplay t)
       (should (not (agent-shell-workspace-test--sidebar-window)))
       (should (= tabs-before (length (tab-bar-tabs)))))))
@@ -116,7 +116,7 @@ Collapsing the last expanded group leaves the sidebar with nothing but
 headers.  Navigation that only knows about agent rows has no stops left,
 so the motion keys go dead and the list cannot be reached again."
   (agent-shell-workspace-test--with-agents
-    (agent-shell-workspace-sidebar-toggle)
+    (agent-shell-workspace-test--toggle-plain)
     (redisplay t)
     (agent-shell-workspace-test--collapse "alpha/")
     (agent-shell-workspace-test--collapse "beta/")
@@ -146,7 +146,7 @@ test is that the command leaves it in the right place on its own, since
 the rebuild that collapsing triggers erases every position the sidebar
 was holding."
   (agent-shell-workspace-test--with-agents
-    (agent-shell-workspace-sidebar-toggle)
+    (agent-shell-workspace-test--toggle-plain)
     (redisplay t)
     ;; Collapse from an agent row, not the header, which is how it happens in
     ;; use: you are reading a session and fold the group around it.
@@ -166,7 +166,7 @@ was holding."
 With every group folded there is no agent row to fall back to, so a
 rebuild that loses the header identity has nowhere sensible to land."
   (agent-shell-workspace-test--with-agents
-    (agent-shell-workspace-sidebar-toggle)
+    (agent-shell-workspace-test--toggle-plain)
     (redisplay t)
     (agent-shell-workspace-test--collapse "alpha/")
     (agent-shell-workspace-test--collapse "beta/")
@@ -186,7 +186,7 @@ agent.  Stepping back twice from that agent has to stop on each header in
 turn -- otherwise a collapsed group cannot be reached, and so cannot be
 re-expanded, with the motion keys the sidebar binds."
   (agent-shell-workspace-test--with-agents
-    (agent-shell-workspace-sidebar-toggle)
+    (agent-shell-workspace-test--toggle-plain)
     (redisplay t)
     (agent-shell-workspace-test--collapse "alpha/")
     (redisplay t)
@@ -255,13 +255,79 @@ main area and keeps the sidebar up."
     (agent-shell-workspace-pick)
     (redisplay t)
     ;; Abandon by closing through the toggle, then reopen it plainly.
-    (agent-shell-workspace-sidebar-toggle)
-    (agent-shell-workspace-sidebar-toggle)
+    (agent-shell-workspace-test--toggle-plain)
+    (agent-shell-workspace-test--toggle-plain)
     (redisplay t)
     (should (null agent-shell-workspace-sidebar--pick-window))
     (agent-shell-workspace-test--select-agent "Claude Agent @ beta")
     (redisplay t)
     (should (agent-shell-workspace-test--sidebar-window))))
+
+(ert-deftest agent-shell-workspace-test-sidebar-toggle-is-one-shot-by-default ()
+  "The default toggle opens as a pick: cursor in the sidebar, selection
+switches the origin window and puts the sidebar away.  No tab either way."
+  (agent-shell-workspace-test--with-agents
+    (let ((origin (selected-window))
+          (tabs-before (length (tab-bar-tabs))))
+      (agent-shell-workspace-sidebar-toggle)
+      (redisplay t)
+      (should (eq (selected-window)
+                  (agent-shell-workspace-test--sidebar-window)))
+      (agent-shell-workspace-test--select-agent "Codex Agent @ alpha")
+      (redisplay t)
+      (should (not (agent-shell-workspace-test--sidebar-window)))
+      (should (eq (selected-window) origin))
+      (should (eq (window-buffer origin) (get-buffer "Codex Agent @ alpha")))
+      (should (= tabs-before (length (tab-bar-tabs)))))))
+
+(ert-deftest agent-shell-workspace-test-one-shot-toggle-away-refocuses ()
+  "Toggling the sidebar away without picking must return the cursor to
+the window the pick came from, leaving its buffer untouched."
+  (agent-shell-workspace-test--with-agents
+    (let ((origin (selected-window))
+          (before (window-buffer (selected-window))))
+      (agent-shell-workspace-sidebar-toggle)
+      (redisplay t)
+      (agent-shell-workspace-sidebar-toggle)
+      (redisplay t)
+      (should (not (agent-shell-workspace-test--sidebar-window)))
+      (should (eq (selected-window) origin))
+      (should (eq (window-buffer origin) before))
+      (should (null agent-shell-workspace-sidebar--pick-window)))))
+
+;;; Working spinner
+
+(ert-deftest agent-shell-workspace-test-working-spinner-advances ()
+  "A spin tick redraws a working agent's row with the next frame."
+  (agent-shell-workspace-test--with-agents
+    (agent-shell-workspace-test--make-live-agent
+     "Claude Agent @ busy" "/tmp/busy/"
+     (cons :tool-calls (list (cons 1 (list :status "in_progress")))))
+    (agent-shell-workspace-test--toggle-plain)
+    (redisplay t)
+    (let ((sidebar (get-buffer agent-shell-workspace-sidebar-buffer-name)))
+      (cl-flet ((rendered ()
+                  (with-current-buffer sidebar
+                    (buffer-substring-no-properties (point-min) (point-max)))))
+        (should (buffer-local-value
+                 'agent-shell-workspace-sidebar--animating sidebar))
+        (should (string-match-p "◐" (rendered)))
+        (agent-shell-workspace-sidebar--spin)
+        (redisplay t)
+        (should (string-match-p "◓" (rendered)))
+        (should-not (string-match-p "◐" (rendered)))))))
+
+(ert-deftest agent-shell-workspace-test-spinner-idles-without-working-agent ()
+  "With no working agent the spin tick must not advance or re-render."
+  (agent-shell-workspace-test--with-agents
+    (agent-shell-workspace-test--toggle-plain)
+    (redisplay t)
+    (let ((sidebar (get-buffer agent-shell-workspace-sidebar-buffer-name))
+          (frame-before agent-shell-workspace--working-frame))
+      (should-not (buffer-local-value
+                   'agent-shell-workspace-sidebar--animating sidebar))
+      (agent-shell-workspace-sidebar--spin)
+      (should (= frame-before agent-shell-workspace--working-frame)))))
 
 ;;; Tiling
 
@@ -271,7 +337,7 @@ main area and keeps the sidebar up."
 One mark alone is not a tile; two are.  Removing down to a single agent
 un-tiles entirely, as does the explicit `t' un-tile command."
   (agent-shell-workspace-test--with-agents
-    (agent-shell-workspace-sidebar-toggle)
+    (agent-shell-workspace-test--toggle-plain)
     (redisplay t)
     (let ((a (get-buffer "Claude Agent @ alpha"))
           (b (get-buffer "Codex Agent @ alpha"))
@@ -322,7 +388,7 @@ un-tiles entirely, as does the explicit `t' un-tile command."
   "With quick-switch on, resting point on an agent shows it in the main
 area without taking focus from the sidebar."
   (agent-shell-workspace-test--with-agents
-    (agent-shell-workspace-sidebar-toggle)
+    (agent-shell-workspace-test--toggle-plain)
     (redisplay t)
     ;; Give the main area a known agent first, then come back.
     (agent-shell-workspace-test--select-agent "Claude Agent @ beta")
@@ -345,7 +411,7 @@ area without taking focus from the sidebar."
 (ert-deftest agent-shell-workspace-test-click-selects-agent ()
   "A mouse click on a row selects that agent, same as RET."
   (agent-shell-workspace-test--with-agents
-    (agent-shell-workspace-sidebar-toggle)
+    (agent-shell-workspace-test--toggle-plain)
     (redisplay t)
     (agent-shell-workspace-test--park-on "Claude Agent @ beta")
     (let* ((window (agent-shell-workspace-test--sidebar-window))
@@ -370,7 +436,7 @@ area without taking focus from the sidebar."
                 ((symbol-function 'comint-send-eof)
                  (lambda () (push (current-buffer) calls)))
                 ((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
-        (agent-shell-workspace-sidebar-toggle)
+        (agent-shell-workspace-test--toggle-plain)
         (redisplay t)
         (agent-shell-workspace-test--run-on
          "Claude Agent @ live" #'agent-shell-workspace-sidebar-kill))
@@ -379,7 +445,7 @@ area without taking focus from the sidebar."
 (ert-deftest agent-shell-workspace-test-rename-preserves-prefix ()
   "Renaming only changes the post-@ portion of the buffer name."
   (agent-shell-workspace-test--with-agents
-    (agent-shell-workspace-sidebar-toggle)
+    (agent-shell-workspace-test--toggle-plain)
     (redisplay t)
     (cl-letf (((symbol-function 'read-string)
                (lambda (&rest _) "renamed")))
@@ -392,7 +458,7 @@ area without taking focus from the sidebar."
   "The plain fixtures have no process, so every one of them reads as
 killed and `d' sweeps them all away."
   (agent-shell-workspace-test--with-agents
-    (agent-shell-workspace-sidebar-toggle)
+    (agent-shell-workspace-test--toggle-plain)
     (redisplay t)
     (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
       (with-selected-window (agent-shell-workspace-test--sidebar-window)
@@ -405,7 +471,7 @@ killed and `d' sweeps them all away."
   "Set-mode, cycle-mode and interrupt run inside the agent at point, and
 restart falls back to a fresh `agent-shell' when the config is unknown."
   (agent-shell-workspace-test--with-agents
-    (agent-shell-workspace-sidebar-toggle)
+    (agent-shell-workspace-test--toggle-plain)
     (redisplay t)
     (let ((target (get-buffer "Codex Agent @ alpha"))
           (calls nil))

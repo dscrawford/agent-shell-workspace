@@ -13,6 +13,7 @@ Toggle into an "Agents" tab with a compact sidebar, buffer isolation, and tiling
 - **Dedicated tab-bar tab** — one keypress to switch between coding and agent monitoring
 - **Compact sidebar** — shows each agent's icon, status, and name at a glance
 - **Status icons** — `●` ready, `◐` working, `◉` waiting for input (red), `✔` finished (cyan), `○` initializing, `✕` killed
+- **Working spinner** — rows for busy agents animate (`◐ ◓ ◑ ◒`) so you can see who's actively working
 - **Buffer isolation** — opening a file or switching to a non-agent buffer auto-redirects to your editing tab
 - **Tiling** — view 2–8 agents side-by-side in an auto-arranged grid
 - **Quick switch** — peek at agents by moving up/down in the sidebar without losing focus
@@ -52,7 +53,13 @@ Press `C-c A w` (or your configured binding) to toggle the workspace. The Agents
 
 ### One-shot picker
 
-`agent-shell-workspace-pick` (`C-c A p` above) pops the sidebar up as a one-time picker: navigate to an agent and press `RET` (or click), and the window you came from switches to that agent while the sidebar closes again. Press `q` to cancel and return to where you were. No tab is created and your window layout is left alone — it's a quick jump to an agent from wherever you are.
+`agent-shell-workspace-pick` (`C-c A p` above) pops the sidebar up as a one-time picker: the cursor moves into the list, navigate to an agent and press `RET` (or click), and the window you came from switches to that agent while the sidebar closes again. Press `q` to cancel and return to where you were. No tab is created and your window layout is left alone — it's a quick jump to an agent from wherever you are.
+
+`agent-shell-workspace-sidebar-toggle` opens the same way by default. If you'd rather have a persistent sidebar that keeps its window up across selections and leaves your cursor where it was, set:
+
+```elisp
+(setq agent-shell-workspace-sidebar-one-shot nil)
+```
 
 ### Sidebar keybindings
 

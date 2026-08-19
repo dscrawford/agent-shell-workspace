@@ -82,6 +82,7 @@ STATE overrides the defaults as in `agent-shell-workspace-test--make-agent'."
   (setq agent-shell-workspace-test--buffers nil)
   (setq agent-shell-workspace--previous-tab nil)
   (setq agent-shell-workspace-sidebar--pick-window nil)
+  (setq agent-shell-workspace--working-frame 0)
   (clrhash agent-shell-workspace--previous-status)
   (clrhash agent-shell-workspace--finished-buffers)
   ;; Isolation state is global.  A test that toggled the workspace must not
@@ -124,6 +125,13 @@ character when no icon is available."
        (agent-shell-workspace-test--make-agent
         "Claude Agent @ beta" "/tmp/beta/" "a beta session")
        ,@body)))
+
+(defun agent-shell-workspace-test--toggle-plain ()
+  "Toggle the sidebar with one-shot picking disabled.
+Most window tests want the pre-one-shot behaviour: sidebar up, focus
+untouched, RET keeps the sidebar open."
+  (let ((agent-shell-workspace-sidebar-one-shot nil))
+    (agent-shell-workspace-sidebar-toggle)))
 
 ;;; Window and sidebar inspection
 

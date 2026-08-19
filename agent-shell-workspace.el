@@ -22,6 +22,7 @@
 ;; Features:
 ;; - Dedicated tab-bar tab with buffer isolation
 ;; - Compact sidebar showing agent status with icons
+;; - Animated spinner on agents that are actively working
 ;; - Tiling support for viewing 2-4 agents side-by-side
 ;; - Agent management (kill, restart, rename, mode-set)
 ;; - Non-agent buffers auto-redirect to your editing tab
@@ -32,9 +33,12 @@
 ;;   (global-set-key (kbd "C-c A p") 'agent-shell-workspace-pick)
 ;;
 ;; `agent-shell-workspace-pick' is a one-shot picker: it pops the sidebar
-;; up, and choosing an agent (RET or mouse) switches the window you came
-;; from to that agent and closes the sidebar again.  No tab, no layout
-;; takeover -- just a quick jump to an agent from wherever you are.
+;; up with the cursor in it, and choosing an agent (RET or mouse) switches
+;; the window you came from to that agent and closes the sidebar again.
+;; No tab, no layout takeover -- just a quick jump to an agent from
+;; wherever you are.  `agent-shell-workspace-sidebar-toggle' opens the
+;; same way by default; set `agent-shell-workspace-sidebar-one-shot' to
+;; nil to make it a plain sidebar that stays up across selections.
 ;;
 ;; Sidebar keybindings:
 ;;   RET   - Focus agent in main area
@@ -294,6 +298,14 @@ default, so entries must be realized before they can be read with
 (defvar agent-shell-workspace-sidebar-width 24
   "Width of the sidebar window in columns.")
 
+(defvar agent-shell-workspace-sidebar-one-shot t
+  "When non-nil, `agent-shell-workspace-sidebar-toggle' opens a one-shot pick.
+
+Opening the sidebar then moves the cursor into it, choosing an agent
+switches the window you came from to that agent and closes the sidebar
+again.  Set to nil for a plain sidebar that keeps its window up and
+leaves focus where it was.")
+
 (defvar agent-shell-workspace-sidebar-show-session-title t
   "When non-nil, show each agent's session title beneath its row.
 
@@ -303,6 +315,15 @@ one-line-per-agent list.")
 
 (defvar-local agent-shell-workspace-sidebar--refresh-timer nil
   "Timer for auto-refreshing the sidebar.")
+
+(defvar agent-shell-workspace-sidebar-spinner-interval 0.5
+  "Seconds between frames of the working-agent spinner.")
+
+(defvar-local agent-shell-workspace-sidebar--spinner-timer nil
+  "Timer that advances the working-agent spinner.")
+
+(defvar-local agent-shell-workspace-sidebar--animating nil
+  "Non-nil when the last render showed at least one working agent.")
 
 (defvar-local agent-shell-workspace-sidebar--collapsed nil
   "List of project keys whose groups are collapsed in the sidebar.")
@@ -355,12 +376,20 @@ Returns the portion after \" @ \" if present, otherwise the full name."
         (match-string 1 name)
       name)))
 
+(defvar agent-shell-workspace-working-frames ["◐" "◓" "◑" "◒"]
+  "Frames cycled by the spinner shown on working agents.")
+
+(defvar agent-shell-workspace--working-frame 0
+  "Index of the spinner frame currently shown for working agents.")
+
 (defun agent-shell-workspace--status-icon (status)
   "Return a status icon string for STATUS."
   (pcase status
     ("ready" "●")
     ("finished" "✔")
-    ("working" "◐")
+    ("working" (aref agent-shell-workspace-working-frames
+                     (mod agent-shell-workspace--working-frame
+                          (length agent-shell-workspace-working-frames))))
     ("waiting" "◉")
     ("initializing" "○")
     ("killed" "✕")
@@ -442,12 +471,19 @@ Displays a compact list of agent-shell buffers with status icons.
   ;; Start auto-refresh timer
   (setq agent-shell-workspace-sidebar--refresh-timer
         (run-with-timer 2 2 #'agent-shell-workspace-sidebar-refresh))
-  ;; Cancel timer when buffer is killed
+  (setq agent-shell-workspace-sidebar--spinner-timer
+        (run-with-timer agent-shell-workspace-sidebar-spinner-interval
+                        agent-shell-workspace-sidebar-spinner-interval
+                        #'agent-shell-workspace-sidebar--spin))
+  ;; Cancel timers when buffer is killed
   (add-hook 'kill-buffer-hook
             (lambda ()
               (when agent-shell-workspace-sidebar--refresh-timer
                 (cancel-timer agent-shell-workspace-sidebar--refresh-timer)
-                (setq agent-shell-workspace-sidebar--refresh-timer nil)))
+                (setq agent-shell-workspace-sidebar--refresh-timer nil))
+              (when agent-shell-workspace-sidebar--spinner-timer
+                (cancel-timer agent-shell-workspace-sidebar--spinner-timer)
+                (setq agent-shell-workspace-sidebar--spinner-timer nil)))
             nil t))
 
 ;;;; Rendering helpers - leveraging agent-shell patterns
@@ -557,6 +593,7 @@ which `goto-char' on the buffer does not put back."
                                           (length (agent-shell-workspace--row-label buf)))
                                         buffers)))))
     (erase-buffer)
+    (setq agent-shell-workspace-sidebar--animating nil)
     (if (null buffers)
         (insert (propertize " No agent buffers" 'face 'font-lock-comment-face))
       (let ((line-num 1))
@@ -594,9 +631,19 @@ which `goto-char' on the buffer does not put back."
                     name-box))
                  ;; Add selection indicator ">" for current buffer
                  (selection-indicator (if (eq buf selected) ">" " "))
-                 (line (concat selection-indicator " " logo-box name-box-styled tile-indicator))
+                 ;; A working agent gets an animated spinner after its name;
+                 ;; the spinner timer advances the frame and re-renders.
+                 (spinner (if (string= status "working")
+                              (propertize
+                               (concat " " (agent-shell-workspace--status-icon status))
+                               'face status-face)
+                            ""))
+                 (line (concat selection-indicator " " logo-box name-box-styled
+                               spinner tile-indicator))
                  (title (when agent-shell-workspace-sidebar-show-session-title
                           (agent-shell-workspace--session-title buf))))
+            (when (string= status "working")
+              (setq agent-shell-workspace-sidebar--animating t))
             ;; Track selected line for cursor positioning
             (when (eq buf selected)
               (setq target-line line-num))
@@ -661,6 +708,20 @@ Point is preserved by `agent-shell-workspace-sidebar--render'."
   (interactive)
   (when-let ((buf (get-buffer agent-shell-workspace-sidebar-buffer-name)))
     (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (agent-shell-workspace-sidebar--render)))))
+
+(defun agent-shell-workspace-sidebar--spin ()
+  "Advance the working-agent spinner one frame and re-render.
+Does nothing unless the sidebar is displayed and its last render showed
+a working agent, so an idle or hidden sidebar costs nothing."
+  (when-let ((buf (get-buffer agent-shell-workspace-sidebar-buffer-name)))
+    (when (and (buffer-live-p buf)
+               (buffer-local-value 'agent-shell-workspace-sidebar--animating buf)
+               (get-buffer-window buf t))
+      (setq agent-shell-workspace--working-frame
+            (mod (1+ agent-shell-workspace--working-frame)
+                 (length agent-shell-workspace-working-frames)))
       (with-current-buffer buf
         (agent-shell-workspace-sidebar--render)))))
 
@@ -927,13 +988,24 @@ Shows the buffer in the main area without moving focus."
 (defun agent-shell-workspace-sidebar-toggle ()
   "Show or hide the agent sidebar in the current frame.
 
+With `agent-shell-workspace-sidebar-one-shot' non-nil (the default),
+opening behaves like `agent-shell-workspace-pick': the cursor moves into
+the sidebar, and choosing an agent switches the window you came from to
+it and puts the sidebar away again.
+
 Unlike `agent-shell-workspace-toggle', this does not create a tab, take
 over the window layout, or activate buffer isolation.  The sidebar is
 just a side window alongside whatever you are already working on."
   (interactive)
-  (if (get-buffer-window agent-shell-workspace-sidebar-buffer-name)
-      (agent-shell-workspace-sidebar-close)
-    (agent-shell-workspace-sidebar-open)))
+  (cond
+   ((get-buffer-window agent-shell-workspace-sidebar-buffer-name)
+    ;; Quit, not close: toggling away an unconsumed pick puts the cursor
+    ;; back where the pick came from.
+    (agent-shell-workspace-sidebar-quit))
+   (agent-shell-workspace-sidebar-one-shot
+    (agent-shell-workspace-pick))
+   (t
+    (agent-shell-workspace-sidebar-open))))
 
 ;;;###autoload
 (defun agent-shell-workspace-pick ()

@@ -97,16 +97,29 @@ read as working."
                        (agent-shell-workspace--buffer-status buffer)))))))
 
 (ert-deftest agent-shell-workspace-unit-status-faces-and-icons ()
-  (pcase-dolist (`(,status ,face ,icon)
-                 '(("ready" success "●")
-                   ("finished" agent-shell-workspace-finished "✔")
-                   ("working" warning "◐")
-                   ("waiting" agent-shell-workspace-waiting "◉")
-                   ("initializing" font-lock-comment-face "○")
-                   ("killed" error "✕")
-                   ("no-such-status" default "?")))
-    (should (eq face (agent-shell-workspace--status-face status)))
-    (should (equal icon (agent-shell-workspace--status-icon status)))))
+  ;; The working icon is animated, so pin it to its first frame here.
+  (let ((agent-shell-workspace--working-frame 0))
+    (pcase-dolist (`(,status ,face ,icon)
+                   '(("ready" success "●")
+                     ("finished" agent-shell-workspace-finished "✔")
+                     ("working" warning "◐")
+                     ("waiting" agent-shell-workspace-waiting "◉")
+                     ("initializing" font-lock-comment-face "○")
+                     ("killed" error "✕")
+                     ("no-such-status" default "?")))
+      (should (eq face (agent-shell-workspace--status-face status)))
+      (should (equal icon (agent-shell-workspace--status-icon status))))))
+
+(ert-deftest agent-shell-workspace-unit-working-icon-cycles ()
+  "The working icon steps through the spinner frames and wraps around.
+Other statuses ignore the frame counter."
+  (let ((agent-shell-workspace--working-frame 0))
+    (let ((frames (mapcar (lambda (frame)
+                            (setq agent-shell-workspace--working-frame frame)
+                            (agent-shell-workspace--status-icon "working"))
+                          '(0 1 2 3 4))))
+      (should (equal '("◐" "◓" "◑" "◒" "◐") frames)))
+    (should (equal "●" (agent-shell-workspace--status-icon "ready")))))
 
 ;;; Names, projects and grouping
 
