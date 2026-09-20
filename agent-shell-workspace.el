@@ -4,7 +4,7 @@
 
 ;; Author: Gabor Veres <gabor.veres@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (agent-shell "0.24.2"))
+;; Package-Requires: ((emacs "29.1") (agent-shell "0.76.1"))
 ;; Keywords: convenience, tools
 ;; URL: https://github.com/gveres/agent-shell-workspace
 
@@ -272,24 +272,31 @@ protocol offers."
 (defun agent-shell-workspace--resolved-agent-configs ()
   "Return `agent-shell-agent-configs' with maker entries realized.
 
-Each entry is either a configuration alist or a function (a symbol or
-lambda) returning one.  agent-shell moved to maker functions as the
-default, so entries must be realized before they can be read with
-`map-elt'.  Handling both shapes keeps this working across versions."
-  (mapcar (lambda (entry)
-            (if (functionp entry)
-                (funcall entry)
-              entry))
-          agent-shell-agent-configs))
+Since agent-shell 0.76 both the variable and its entries may be
+functions to call; realizing them lets `map-elt' read the result."
+  (let ((entries (if (functionp agent-shell-agent-configs)
+                     (funcall agent-shell-agent-configs)
+                   agent-shell-agent-configs)))
+    (mapcar (lambda (entry)
+              (if (functionp entry)
+                  (funcall entry)
+                entry))
+            entries)))
 
 (defun agent-shell-workspace--buffer-config (buffer)
-  "Return the agent-shell config used for BUFFER, or nil."
+  "Return the agent-shell config used for BUFFER, or nil.
+
+Prefers agent-shell's own `(:agent-config)' buffer state, which
+survives renames; falls back to matching the buffer name against
+`agent-shell-agent-configs' for older agent-shell versions."
   (with-current-buffer buffer
     (when (derived-mode-p 'agent-shell-mode)
-      (let ((prefix (replace-regexp-in-string " Agent @ .*$" "" (buffer-name))))
-        (seq-find (lambda (config)
-                    (string= prefix (map-elt config :buffer-name)))
-                  (agent-shell-workspace--resolved-agent-configs))))))
+      (or (and (boundp 'agent-shell--state)
+               (map-elt agent-shell--state :agent-config))
+          (let ((prefix (replace-regexp-in-string " Agent @ .*$" "" (buffer-name))))
+            (seq-find (lambda (config)
+                        (string= prefix (map-elt config :buffer-name)))
+                      (agent-shell-workspace--resolved-agent-configs)))))))
 
 ;;; Tab helpers
 
@@ -373,16 +380,28 @@ so it cannot go stale.")
 
 ;;;; Display helpers
 
+(defvar agent-shell-workspace--icon-error nil
+  "Last icon lookup error reported, so a repeating timer logs it once.")
+
 (defun agent-shell-workspace--agent-icon (buffer)
   "Return an icon string for the agent type of BUFFER.
 Uses `agent-shell--config-icon' when available to show the same
-icons as agent-shell's own UI.  Falls back to a single character."
-  (let ((config (agent-shell-workspace--buffer-config buffer)))
-    (if (and config (fboundp 'agent-shell--config-icon))
-        (let ((icon (agent-shell--config-icon :config config)))
-          (if (and icon (not (string-empty-p icon)))
-              icon
-            (agent-shell-workspace--agent-type-fallback buffer)))
+icons as agent-shell's own UI.  Falls back to a single character,
+also when the lookup signals: the icon is decoration, and one bad
+config maker must not blank the whole sidebar."
+  (let ((icon (condition-case err
+                  (when-let* ((config (agent-shell-workspace--buffer-config buffer))
+                              ((fboundp 'agent-shell--config-icon)))
+                    (agent-shell--config-icon :config config))
+                (error
+                 (let ((text (error-message-string err)))
+                   (unless (equal text agent-shell-workspace--icon-error)
+                     (setq agent-shell-workspace--icon-error text)
+                     (message "agent-shell-workspace: icon lookup failed for %s: %s"
+                              (buffer-name buffer) text)))
+                 nil))))
+    (if (and icon (not (string-empty-p icon)))
+        icon
       (agent-shell-workspace--agent-type-fallback buffer))))
 
 (defun agent-shell-workspace--agent-type-fallback (buffer)

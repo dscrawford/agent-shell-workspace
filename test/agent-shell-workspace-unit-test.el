@@ -254,6 +254,89 @@ Two projects sharing a basename must stay separate groups."
               (should (null (agent-shell-workspace--buffer-config outsider))))
           (kill-buffer outsider))))))
 
+(ert-deftest agent-shell-workspace-unit-config-resolution-function-valued ()
+  "agent-shell 0.76+ lets `agent-shell-agent-configs' itself be a function.
+It must be called for its list, not iterated as a sequence."
+  (agent-shell-workspace-test--with-fixture
+    (let ((agent-shell-agent-configs
+           (lambda () (list (lambda () '((:buffer-name . "Fn")))
+                            '((:buffer-name . "Plain"))))))
+      (should (equal '(((:buffer-name . "Fn")) ((:buffer-name . "Plain")))
+                     (agent-shell-workspace--resolved-agent-configs)))
+      (let ((buffer (agent-shell-workspace-test--make-agent
+                     "Plain Agent @ x" "/tmp/x/" "t")))
+        (should (equal '((:buffer-name . "Plain"))
+                       (agent-shell-workspace--buffer-config buffer)))))))
+
+(ert-deftest agent-shell-workspace-unit-config-resolution-symbol-valued ()
+  "Function symbols resolve too: the shipped default list is one of those."
+  (agent-shell-workspace-test--with-fixture
+    (cl-letf (((symbol-function 'agent-shell-workspace-test--outer-maker)
+               (lambda () (list #'agent-shell-workspace-test--entry-maker
+                                '((:buffer-name . "Plain")))))
+              ((symbol-function 'agent-shell-workspace-test--entry-maker)
+               (lambda () '((:buffer-name . "Named")))))
+      (let ((agent-shell-agent-configs #'agent-shell-workspace-test--outer-maker))
+        (should (equal '(((:buffer-name . "Named")) ((:buffer-name . "Plain")))
+                       (agent-shell-workspace--resolved-agent-configs)))))))
+
+(ert-deftest agent-shell-workspace-unit-config-resolution-empty ()
+  "Nil, or a maker filtering every agent out, resolves to nil without error."
+  (agent-shell-workspace-test--with-fixture
+    (let ((agent-shell-agent-configs nil))
+      (should (null (agent-shell-workspace--resolved-agent-configs))))
+    (let ((agent-shell-agent-configs (lambda () nil)))
+      (should (null (agent-shell-workspace--resolved-agent-configs)))
+      (let ((buffer (agent-shell-workspace-test--make-agent
+                     "Claude Agent @ x" "/tmp/x/" "t")))
+        (should (null (agent-shell-workspace--buffer-config buffer)))))))
+
+(ert-deftest agent-shell-workspace-unit-config-resolution-calls-every-time ()
+  "The maker runs on every access, as agent-shell documents; never cached."
+  (agent-shell-workspace-test--with-fixture
+    (let* ((calls 0)
+           (agent-shell-agent-configs
+            (lambda ()
+              (setq calls (1+ calls))
+              (list `((:buffer-name . ,(format "Gen-%d" calls)))))))
+      (should (equal '(((:buffer-name . "Gen-1")))
+                     (agent-shell-workspace--resolved-agent-configs)))
+      (should (equal '(((:buffer-name . "Gen-2")))
+                     (agent-shell-workspace--resolved-agent-configs))))))
+
+(ert-deftest agent-shell-workspace-unit-buffer-config-state-overrides-name-match ()
+  "The state's own `:agent-config' wins over a conflicting name match."
+  (agent-shell-workspace-test--with-fixture
+    (let ((agent-shell-agent-configs
+           '(((:buffer-name . "Claude") (:identifier . from-name-lookup)))))
+      (let ((buffer (agent-shell-workspace-test--make-agent
+                     "Claude Agent @ x" "/tmp/x/" "t"
+                     (cons :agent-config '((:buffer-name . "Claude")
+                                           (:identifier . from-state))))))
+        (should (eq 'from-state
+                    (map-elt (agent-shell-workspace--buffer-config buffer)
+                             :identifier)))))))
+
+(ert-deftest agent-shell-workspace-unit-buffer-config-falls-back-on-nil-state-value ()
+  "A present-but-nil `:agent-config', agent-shell's pre-session default,
+falls through to name matching."
+  (agent-shell-workspace-test--with-fixture
+    (let ((agent-shell-agent-configs '(((:buffer-name . "Claude")))))
+      (let ((buffer (agent-shell-workspace-test--make-agent
+                     "Claude Agent @ x" "/tmp/x/" "t"
+                     (cons :agent-config nil))))
+        (should (equal '((:buffer-name . "Claude"))
+                       (agent-shell-workspace--buffer-config buffer)))))))
+
+(ert-deftest agent-shell-workspace-unit-agent-icon-survives-config-error ()
+  "A failing config lookup degrades to the fallback letter, not a render error.
+This is the failure that blanked the whole sidebar on agent-shell 0.76."
+  (agent-shell-workspace-test--with-fixture
+    (let ((agent-shell-agent-configs (lambda () (error "maker exploded")))
+          (buffer (agent-shell-workspace-test--make-agent
+                   "Claude Agent @ x" "/tmp/x/" "t")))
+      (should (equal "C" (agent-shell-workspace--agent-icon buffer))))))
+
 ;;; Workspace membership
 
 (ert-deftest agent-shell-workspace-unit-agent-buffer-classification ()
